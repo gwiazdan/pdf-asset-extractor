@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from typing import Final
 
+from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor
 from qfluentwidgets import Theme, setFontFamilies, setTheme, setThemeColor
 from qframelesswindow.utils import getSystemAccentColor
@@ -20,6 +21,8 @@ ACCENT_COLOR: Final[QColor] = (
 ACRYLIC_ENABLED: Final[bool] = sys.platform == "win32"
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 LOGO_PATH = BASE_DIR / "assets" / "logo.svg"
+PDF_ICON_PATH = BASE_DIR / "assets" / "pdf.svg"
+PDF_TILE_SIZE = QSize(180, 180)
 
 
 def apply_default_config() -> None:
