@@ -79,8 +79,10 @@ class MainWindow(MSFluentWindow):
         self._pdf_view = self._create_pdf_view()
         self._pdf_view.setObjectName("pdfInterface")
 
-        self.addSubInterface(self._folder_picker, FluentIcon.FOLDER, "Folder")
-        self.stackedWidget.addWidget(self._content_view)
+        self._folder_navigation = self.addSubInterface(
+            self._content_view, FluentIcon.FOLDER, "Folder"
+        )
+        self.stackedWidget.addWidget(self._folder_picker)
         self._pdf_navigation = self.addSubInterface(
             self._pdf_view, FluentIcon.DOCUMENT, "Plik PDF"
         )
@@ -242,6 +244,8 @@ class MainWindow(MSFluentWindow):
         self.folder_label.setText(str(folder_path))
         self.content_list.clear()
         self.selected_pdf = None
+        self.selected_pdf_label.setText("Nie wybrano pliku PDF")
+        self._pdf_navigation.setEnabled(False)
         icon_provider = QFileIconProvider()
         for entry in entries:
             if entry.suffix.lower() != ".pdf":

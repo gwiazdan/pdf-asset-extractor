@@ -22,6 +22,7 @@ class FolderPickerWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.current_folder = Path.home()
+        self.selected_folder: Path | None = None
         self.icon_provider = QFileIconProvider()
         self._build_ui()
         self._refresh()
@@ -33,6 +34,7 @@ class FolderPickerWidget(QWidget):
         self.path_label = StrongBodyLabel()
         self.folder_list = ListWidget()
         self.folder_list.setViewMode(ListWidget.ViewMode.ListMode)
+        self.folder_list.itemClicked.connect(self._select_item)
         self.folder_list.itemDoubleClicked.connect(self._open_item)
 
         navigation = QHBoxLayout()
@@ -48,19 +50,20 @@ class FolderPickerWidget(QWidget):
         buttons.addWidget(select_button)
 
         layout.addLayout(navigation)
-        layout.addWidget(CaptionLabel("Foldery i pliki PDF"))
+        layout.addWidget(CaptionLabel("Foldery"))
         layout.addWidget(self.folder_list)
         layout.addLayout(buttons)
 
     def _refresh(self) -> None:
         self.path_label.setText(str(self.current_folder))
         self.folder_list.clear()
+        self.selected_folder = None
         try:
             entries = sorted(
                 (
                     path
                     for path in self.current_folder.iterdir()
-                    if path.is_dir() or path.suffix.lower() == ".pdf"
+                    if path.is_dir()
                 ),
                 key=lambda path: path.name.lower(),
             )
@@ -70,14 +73,19 @@ class FolderPickerWidget(QWidget):
         for entry in entries:
             item = QListWidgetItem(icon_for_path(entry, self.icon_provider), entry.name)
             item.setData(Qt.ItemDataRole.UserRole, str(entry))
-            if entry.is_file():
-                item.setToolTip(str(entry))
+            item.setToolTip(str(entry))
             self.folder_list.addItem(item)
+
+    def _select_item(self, item: QListWidgetItem) -> None:
+        entry = Path(item.data(Qt.ItemDataRole.UserRole))
+        if entry.is_dir():
+            self.selected_folder = entry
 
     def _open_item(self, item: QListWidgetItem) -> None:
         entry = Path(item.data(Qt.ItemDataRole.UserRole))
         if not entry.is_dir():
             return
+
         self.current_folder = entry
         self._refresh()
 
@@ -89,4 +97,4 @@ class FolderPickerWidget(QWidget):
         self._refresh()
 
     def _select_folder(self) -> None:
-        self.folder_selected.emit(self.current_folder)
+        self.folder_selected.emit(self.selected_folder or self.current_folder)
