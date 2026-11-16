@@ -11,6 +11,10 @@ class PDFExtractionError(RuntimeError):
     """Raised when a PDF cannot be opened or an image cannot be extracted."""
 
 
+class ImageConversionError(RuntimeError):
+    """Raised when an extracted image cannot be encoded in the requested format."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractedImage:
     """An embedded image together with its PDF metadata and thumbnail."""
@@ -108,3 +112,26 @@ def extract_images_with_thumbnails(
                 )
 
     return extracted
+
+
+def encode_image(image: ExtractedImage, output_format: str) -> tuple[bytes, str]:
+    """Encode an extracted image and return its data and file extension."""
+    if output_format == "original":
+        return image.data, image.extension
+
+    if output_format not in {"png", "jpg"}:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+    try:
+        pixmap = fitz.Pixmap(image.data)
+        if output_format == "jpg":
+            if pixmap.alpha:
+                pixmap = fitz.Pixmap(pixmap, 0)
+            if pixmap.colorspace is None or pixmap.colorspace.n != 3:
+                pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+        return pixmap.tobytes(output_format), output_format
+    except Exception as error:
+        raise ImageConversionError(
+            f"Nie można przekonwertować obrazu {image.image_index} "
+            f"na stronie {image.page_number} do formatu {output_format.upper()}."
+        ) from error

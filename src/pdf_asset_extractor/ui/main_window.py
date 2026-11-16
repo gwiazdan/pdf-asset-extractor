@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     CaptionLabel,
+    ComboBox,
     FluentIcon,
     ListWidget,
     MessageBox,
@@ -32,7 +33,9 @@ from pdf_asset_extractor.config import (
 )
 from pdf_asset_extractor.extractor import (
     ExtractedImage,
+    ImageConversionError,
     PDFExtractionError,
+    encode_image,
     extract_images_with_thumbnails,
 )
 from pdf_asset_extractor.ui.file_utils import icon_for_path
@@ -146,6 +149,14 @@ class MainWindow(MSFluentWindow):
         self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.image_list, 1)
 
+        export_options = QHBoxLayout()
+        export_options.addWidget(CaptionLabel("Format wyjściowy"))
+        self.output_format_combo = ComboBox()
+        self.output_format_combo.addItems(["Oryginalny", "PNG", "JPEG"])
+        export_options.addWidget(self.output_format_combo)
+        export_options.addStretch()
+        layout.addLayout(export_options)
+
         self.export_button = PushButton("Eksportuj zaznaczone obrazy")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_selected_images)
@@ -205,7 +216,7 @@ class MainWindow(MSFluentWindow):
             self.export_button.setEnabled(True)
 
     def _export_selected_images(self) -> None:
-        """Save the images selected in the list in their original formats."""
+        """Save the selected images using the chosen output format."""
         selected_items = self.image_list.selectedItems()
         if not selected_items:
             MessageBox("Brak zaznaczenia", "Zaznacz co najmniej jeden obraz.", self).exec()
@@ -215,14 +226,19 @@ class MainWindow(MSFluentWindow):
         if not output_path:
             return
 
+        output_format = {"Oryginalny": "original", "PNG": "png", "JPEG": "jpg"}.get(
+            self.output_format_combo.currentText(), "original"
+        )
         try:
             for item in selected_items:
                 image = self.extracted_images[item.data(Qt.ItemDataRole.UserRole)]
+                image_data, extension = encode_image(image, output_format)
                 filename = (
-                    f"page-{image.page_number:04d}-image-{image.image_index:04d}.{image.extension}"
+                    f"page-{image.page_number:04d}-image-"
+                    f"{image.image_index:04d}.{extension}"
                 )
-                (Path(output_path) / filename).write_bytes(image.data)
-        except OSError as error:
+                (Path(output_path) / filename).write_bytes(image_data)
+        except (ImageConversionError, OSError) as error:
             MessageBox("Eksport nie powiódł się", str(error), self).exec()
             return
 
