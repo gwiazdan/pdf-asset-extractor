@@ -2,9 +2,11 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
+    QFileDialog,
     QFileIconProvider,
     QHBoxLayout,
     QListWidget,
@@ -28,8 +30,30 @@ from pdf_asset_extractor.config import (
     PDF_TILE_SIZE,
     apply_default_config,
 )
+from pdf_asset_extractor.extractor import (
+    ExtractedImage,
+    PDFExtractionError,
+    extract_images_with_thumbnails,
+)
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
+
+
+def _fit_thumbnail(pixmap: QPixmap, size: QSize) -> QPixmap:
+    """Fit a thumbnail inside a square canvas without cropping it."""
+    scaled = pixmap.scaled(
+        size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = QPixmap(size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    x = (size.width() - scaled.width()) // 2
+    y = (size.height() - scaled.height()) // 2
+    painter.drawPixmap(x, y, scaled)
+    painter.end()
+    return canvas
 
 
 class MainWindow(MSFluentWindow):
@@ -40,11 +64,12 @@ class MainWindow(MSFluentWindow):
         self.init_window()
 
     def init_window(self) -> None:
-        self.resize(900, 600)
+        self.resize(1024, 768)
         self.setWindowTitle("PDF Asset Extractor")
         self.setWindowIcon(QIcon(str(LOGO_PATH)))
         self.titleBar.setFixedHeight(45)
         self.selected_pdf: Path | None = None
+        self.extracted_images: list[ExtractedImage] = []
 
         self._folder_picker = FolderPickerWidget()
         self._folder_picker.setObjectName("folderInterface")
@@ -108,7 +133,21 @@ class MainWindow(MSFluentWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.selected_pdf_label)
-        layout.addStretch()
+        self.image_list = ListWidget()
+        self.image_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.image_list.setIconSize(QSize(192, 192))
+        self.image_list.setGridSize(QSize(240, 240))
+        self.image_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.image_list.setMovement(QListWidget.Movement.Static)
+        self.image_list.setSpacing(12)
+        self.image_list.setWordWrap(True)
+        self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        layout.addWidget(self.image_list, 1)
+
+        self.export_button = PushButton("Eksportuj zaznaczone obrazy")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_selected_images)
+        layout.addWidget(self.export_button)
         return view
 
     def open_folder(self) -> None:
@@ -117,8 +156,79 @@ class MainWindow(MSFluentWindow):
     def _select_pdf(self, item: QListWidgetItem) -> None:
         self.selected_pdf = Path(item.data(Qt.ItemDataRole.UserRole))
         self.selected_pdf_label.setText(self.selected_pdf.name)
+        self._show_pdf_images()
         self._pdf_navigation.setEnabled(True)
         self.switchTo(self._pdf_view)
+
+    def _show_pdf_images(self) -> None:
+        """Extract the selected PDF's images and display their thumbnails."""
+        if self.selected_pdf is None:
+            return
+
+        self.image_list.clear()
+        self.extracted_images = []
+        self.export_button.setEnabled(False)
+        try:
+            images = extract_images_with_thumbnails(self.selected_pdf, thumbnail_size=256)
+        except PDFExtractionError as error:
+            MessageBox("Nie można odczytać pliku PDF", str(error), self).exec()
+            return
+
+        self.extracted_images = images
+        for image_position, image in enumerate(images):
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(image.thumbnail, "PNG"):
+                MessageBox(
+                    "Nie można wyświetlić miniatury",
+                    f"Miniatura obrazu {image.image_index} na stronie "
+                    f"{image.page_number} jest nieprawidłowa.",
+                    self,
+                ).exec()
+                continue
+
+            icon = QIcon(_fit_thumbnail(pixmap, QSize(192, 192)))
+            item = QListWidgetItem(
+                icon,
+                f"Strona {image.page_number}, obraz {image.image_index}\n"
+                f"{image.width} x {image.height} px",
+            )
+            item.setSizeHint(self.image_list.gridSize())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+            item.setData(Qt.ItemDataRole.UserRole, image_position)
+            self.image_list.addItem(item)
+
+        if not images:
+            self.image_list.addItem(QListWidgetItem("Brak osadzonych obrazów"))
+        else:
+            self.export_button.setEnabled(True)
+
+    def _export_selected_images(self) -> None:
+        """Save the images selected in the list in their original formats."""
+        selected_items = self.image_list.selectedItems()
+        if not selected_items:
+            MessageBox("Brak zaznaczenia", "Zaznacz co najmniej jeden obraz.", self).exec()
+            return
+
+        output_path = QFileDialog.getExistingDirectory(self, "Wybierz folder eksportu")
+        if not output_path:
+            return
+
+        try:
+            for item in selected_items:
+                image = self.extracted_images[item.data(Qt.ItemDataRole.UserRole)]
+                filename = (
+                    f"page-{image.page_number:04d}-image-{image.image_index:04d}.{image.extension}"
+                )
+                (Path(output_path) / filename).write_bytes(image.data)
+        except OSError as error:
+            MessageBox("Eksport nie powiódł się", str(error), self).exec()
+            return
+
+        MessageBox(
+            "Eksport zakończony",
+            f"Zapisano {len(selected_items)} obrazów w folderze {output_path}.",
+            self,
+        ).exec()
 
     def _show_folder_content(self, folder_path: Path) -> None:
         try:
