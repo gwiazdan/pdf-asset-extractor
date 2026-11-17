@@ -39,6 +39,7 @@ from pdf_asset_extractor.extractor import (
     extract_images_with_thumbnails,
 )
 from pdf_asset_extractor.image_enhancer import (
+    SUPER_IMAGE_MODELS,
     EnhancementError,
     EnhancementMethod,
     EnhancementOptions,
@@ -166,10 +167,9 @@ class MainWindow(MSFluentWindow):
                 "Bez poprawy",
                 "Skalowanie Lanczosem",
                 "Wyostrzanie maską",
-                "Real-ESRGAN (tymczasowo zablokowany)",
+                "Super-image",
             ]
         )
-        self.enhancement_combo.setItemEnabled(3, False)
         self.enhancement_combo.currentIndexChanged.connect(self._update_enhancement_controls)
         enhancement_row.addWidget(self.enhancement_combo)
         enhancement_row.addWidget(CaptionLabel("Tryb rozmiaru"))
@@ -188,8 +188,27 @@ class MainWindow(MSFluentWindow):
         enhancement_row.addWidget(self.enhancement_width_combo)
         enhancement_row.addStretch()
         enhancement_options.addLayout(enhancement_row)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(CaptionLabel("Model"))
+        self.enhancement_model_combo: ComboBox = ComboBox()
+        self.enhancement_model_combo.addItems([name for name, _ in SUPER_IMAGE_MODELS])
+        model_row.addWidget(self.enhancement_model_combo)
+        model_row.addWidget(CaptionLabel("Urządzenie"))
+        self.enhancement_device_combo: ComboBox = ComboBox()
+        self.enhancement_device_combo.addItems(["Auto", "CPU", "CUDA"])
+        model_row.addWidget(self.enhancement_device_combo)
+        model_row.addWidget(CaptionLabel("Maska"))
+        self.enhancement_unsharp_combo: ComboBox = ComboBox()
+        self.enhancement_unsharp_combo.addItems(["1 / 100 / 0", "2 / 150 / 3", "3 / 200 / 5"])
+        model_row.addWidget(self.enhancement_unsharp_combo)
+        model_row.addStretch()
+        enhancement_options.addLayout(model_row)
         enhancement_options.addWidget(
-            CaptionLabel("Opcja zostanie zastosowana wsadowo tuż przed zapisem plików.")
+            CaptionLabel(
+                "Opcja zostanie zastosowana wsadowo tuż przed zapisem plików. "
+                "Maska: promień / siła / próg."
+            )
         )
         layout.addLayout(enhancement_options)
 
@@ -210,12 +229,20 @@ class MainWindow(MSFluentWindow):
 
     def _update_enhancement_controls(self) -> None:
         """Enable only controls supported by the selected enhancement backend."""
-        uses_scaling = self.enhancement_combo.currentIndex() == 1
-        uses_width = self.enhancement_combo.currentIndex() == 1
+        method_index = self.enhancement_combo.currentIndex()
+        uses_scaling = method_index in {1, 3}
+        uses_width = method_index in {1, 3}
+        super_image_selected = method_index == 3
+        self.enhancement_scale_combo.setItemEnabled(0, not super_image_selected)
+        if super_image_selected and self.enhancement_scale_combo.currentIndex() == 0:
+            self.enhancement_scale_combo.setCurrentIndex(1)
         uses_width_mode = uses_width and self.enhancement_resize_mode_combo.currentIndex() == 1
         self.enhancement_resize_mode_combo.setEnabled(uses_width)
         self.enhancement_scale_combo.setEnabled(uses_scaling and not uses_width_mode)
         self.enhancement_width_combo.setEnabled(uses_width_mode)
+        self.enhancement_model_combo.setEnabled(method_index == 3)
+        self.enhancement_device_combo.setEnabled(method_index == 3)
+        self.enhancement_unsharp_combo.setEnabled(method_index == 2)
 
     def open_folder(self) -> None:
         self.switchTo(self._folder_picker)
@@ -287,7 +314,7 @@ class MainWindow(MSFluentWindow):
             0: EnhancementMethod.NONE,
             1: EnhancementMethod.LANCZOS,
             2: EnhancementMethod.UNSHARP_MASK,
-            3: EnhancementMethod.REAL_ESRGAN,
+            3: EnhancementMethod.SUPER_IMAGE,
         }[self.enhancement_combo.currentIndex()]
         resize_mode = (
             ResizeMode.WIDTH
@@ -299,6 +326,13 @@ class MainWindow(MSFluentWindow):
             resize_mode=resize_mode,
             scale=float(self.enhancement_scale_combo.currentText().removesuffix("x")),
             target_width=int(self.enhancement_width_combo.currentText().removesuffix(" px")),
+            model_name=self.enhancement_model_combo.currentText(),
+            device={"Auto": "auto", "CPU": "cpu", "CUDA": "cuda"}[
+                self.enhancement_device_combo.currentText()
+            ],
+            unsharp_radius=float(self.enhancement_unsharp_combo.currentText().split(" / ")[0]),
+            unsharp_percent=int(self.enhancement_unsharp_combo.currentText().split(" / ")[1]),
+            unsharp_threshold=int(self.enhancement_unsharp_combo.currentText().split(" / ")[2]),
         )
         try:
             for item in selected_items:

@@ -219,5 +219,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Real-Esrgan
-esrgan/
+# Output
+output/
