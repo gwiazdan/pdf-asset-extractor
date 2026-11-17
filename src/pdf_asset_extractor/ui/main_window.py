@@ -38,6 +38,13 @@ from pdf_asset_extractor.extractor import (
     encode_image,
     extract_images_with_thumbnails,
 )
+from pdf_asset_extractor.image_enhancer import (
+    EnhancementError,
+    EnhancementMethod,
+    EnhancementOptions,
+    ResizeMode,
+    enhance_image,
+)
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
 
@@ -149,6 +156,43 @@ class MainWindow(MSFluentWindow):
         self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.image_list, 1)
 
+        enhancement_options = QVBoxLayout()
+        enhancement_options.addWidget(CaptionLabel("Poprawa zaznaczonych obrazów"))
+        enhancement_row = QHBoxLayout()
+        enhancement_row.addWidget(CaptionLabel("Metoda"))
+        self.enhancement_combo: ComboBox = ComboBox()
+        self.enhancement_combo.addItems(
+            [
+                "Bez poprawy",
+                "Skalowanie Lanczosem",
+                "Wyostrzanie maską",
+                "Real-ESRGAN (tymczasowo zablokowany)",
+            ]
+        )
+        self.enhancement_combo.setItemEnabled(3, False)
+        self.enhancement_combo.currentIndexChanged.connect(self._update_enhancement_controls)
+        enhancement_row.addWidget(self.enhancement_combo)
+        enhancement_row.addWidget(CaptionLabel("Tryb rozmiaru"))
+        self.enhancement_resize_mode_combo: ComboBox = ComboBox()
+        self.enhancement_resize_mode_combo.addItems(["Współczynnik", "Szerokość docelowa"])
+        self.enhancement_resize_mode_combo.currentIndexChanged.connect(
+            self._update_enhancement_controls
+        )
+        enhancement_row.addWidget(self.enhancement_resize_mode_combo)
+        enhancement_row.addWidget(CaptionLabel("Wartość"))
+        self.enhancement_scale_combo: ComboBox = ComboBox()
+        self.enhancement_scale_combo.addItems(["1.5x", "2x", "4x"])
+        self.enhancement_width_combo: ComboBox = ComboBox()
+        self.enhancement_width_combo.addItems(["1000 px", "1500 px", "2000 px", "3000 px"])
+        enhancement_row.addWidget(self.enhancement_scale_combo)
+        enhancement_row.addWidget(self.enhancement_width_combo)
+        enhancement_row.addStretch()
+        enhancement_options.addLayout(enhancement_row)
+        enhancement_options.addWidget(
+            CaptionLabel("Opcja zostanie zastosowana wsadowo tuż przed zapisem plików.")
+        )
+        layout.addLayout(enhancement_options)
+
         export_options = QHBoxLayout()
         export_options.addWidget(CaptionLabel("Format wyjściowy"))
         self.output_format_combo = ComboBox()
@@ -161,7 +205,17 @@ class MainWindow(MSFluentWindow):
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_selected_images)
         layout.addWidget(self.export_button)
+        self._update_enhancement_controls()
         return view
+
+    def _update_enhancement_controls(self) -> None:
+        """Enable only controls supported by the selected enhancement backend."""
+        uses_scaling = self.enhancement_combo.currentIndex() == 1
+        uses_width = self.enhancement_combo.currentIndex() == 1
+        uses_width_mode = uses_width and self.enhancement_resize_mode_combo.currentIndex() == 1
+        self.enhancement_resize_mode_combo.setEnabled(uses_width)
+        self.enhancement_scale_combo.setEnabled(uses_scaling and not uses_width_mode)
+        self.enhancement_width_combo.setEnabled(uses_width_mode)
 
     def open_folder(self) -> None:
         self.switchTo(self._folder_picker)
@@ -229,16 +283,46 @@ class MainWindow(MSFluentWindow):
         output_format = {"Oryginalny": "original", "PNG": "png", "JPEG": "jpg"}.get(
             self.output_format_combo.currentText(), "original"
         )
+        enhancement_method = {
+            0: EnhancementMethod.NONE,
+            1: EnhancementMethod.LANCZOS,
+            2: EnhancementMethod.UNSHARP_MASK,
+            3: EnhancementMethod.REAL_ESRGAN,
+        }[self.enhancement_combo.currentIndex()]
+        resize_mode = (
+            ResizeMode.WIDTH
+            if self.enhancement_resize_mode_combo.currentIndex() == 1
+            else ResizeMode.FACTOR
+        )
+        enhancement_options = EnhancementOptions(
+            method=enhancement_method,
+            resize_mode=resize_mode,
+            scale=float(self.enhancement_scale_combo.currentText().removesuffix("x")),
+            target_width=int(self.enhancement_width_combo.currentText().removesuffix(" px")),
+        )
         try:
             for item in selected_items:
                 image = self.extracted_images[item.data(Qt.ItemDataRole.UserRole)]
-                image_data, extension = encode_image(image, output_format)
+                enhanced_data = enhance_image(image.data, enhancement_options)
+                if enhancement_method is EnhancementMethod.NONE:
+                    image_data, extension = encode_image(image, output_format)
+                else:
+                    enhanced_image = ExtractedImage(
+                        page_number=image.page_number,
+                        image_index=image.image_index,
+                        width=image.width,
+                        height=image.height,
+                        extension="png",
+                        data=enhanced_data,
+                        thumbnail=image.thumbnail,
+                    )
+                    image_data, extension = encode_image(enhanced_image, output_format)
                 filename = (
                     f"page-{image.page_number:04d}-image-"
                     f"{image.image_index:04d}.{extension}"
                 )
                 (Path(output_path) / filename).write_bytes(image_data)
-        except (ImageConversionError, OSError) as error:
+        except (EnhancementError, ImageConversionError, OSError) as error:
             MessageBox("Eksport nie powiódł się", str(error), self).exec()
             return
 
