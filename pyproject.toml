@@ -20,6 +20,7 @@ dependencies = [
   "pymupdf>=2.1",
   "pyside6>=6.10.0",
   "pyside6-fluent-widgets[full]>=1.11.3",
+  "pytest>=9.2.0",
   "super-image>=0.2.0",
 ]
 

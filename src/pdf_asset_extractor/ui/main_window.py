@@ -1,8 +1,8 @@
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -49,6 +49,8 @@ from pdf_asset_extractor.image_enhancer import (
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
 
+PDF_TILE_TEXT_WIDTH = PDF_TILE_SIZE.width() - 16
+
 
 def _fit_thumbnail(pixmap: QPixmap, size: QSize) -> QPixmap:
     """Fit a thumbnail inside a square canvas without cropping it."""
@@ -65,6 +67,38 @@ def _fit_thumbnail(pixmap: QPixmap, size: QSize) -> QPixmap:
     painter.drawPixmap(x, y, scaled)
     painter.end()
     return canvas
+
+
+def _wrap_pdf_filename(filename: str, font_metrics: QFontMetrics) -> str:
+    """Insert display-only line breaks so even unbroken filenames fit a tile."""
+    lines: list[str] = []
+    current_line = ""
+    for character in filename:
+        candidate = current_line + character
+        if current_line and font_metrics.horizontalAdvance(candidate) > PDF_TILE_TEXT_WIDTH:
+            lines.append(current_line)
+            current_line = character
+        else:
+            current_line = candidate
+    if current_line:
+        lines.append(current_line)
+    return "\n".join(lines)
+
+
+def _pdf_tile_size(
+    display_name: str,
+    font_metrics: QFontMetrics,
+    icon_size: QSize,
+) -> QSize:
+    """Return a tile size that gives the wrapped filename enough vertical space."""
+    text_bounds = font_metrics.boundingRect(
+        QRect(0, 0, PDF_TILE_TEXT_WIDTH, 10_000),
+        Qt.TextFlag.TextWordWrap,
+        display_name,
+    )
+    text_height = text_bounds.height()
+    tile_height = max(PDF_TILE_SIZE.height(), icon_size.height() + text_height + 32)
+    return QSize(PDF_TILE_SIZE.width(), tile_height)
 
 
 class MainWindow(MSFluentWindow):
@@ -122,13 +156,12 @@ class MainWindow(MSFluentWindow):
         self.content_list = ListWidget()
         self.content_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.content_list.setIconSize(QSize(64, 64))
-        self.content_list.setGridSize(PDF_TILE_SIZE)
+        self.content_list.setGridSize(QSize())
         self.content_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.content_list.setMovement(QListWidget.Movement.Static)
         self.content_list.setSpacing(12)
         self.content_list.setWordWrap(True)
         self.content_list.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.content_list.setUniformItemSizes(True)
         self.content_list.itemClicked.connect(self._select_pdf)
 
         layout.addWidget(CaptionLabel("Zawartość folderu"))
@@ -381,11 +414,15 @@ class MainWindow(MSFluentWindow):
         self.selected_pdf_label.setText("Nie wybrano pliku PDF")
         self._pdf_navigation.setEnabled(False)
         icon_provider = QFileIconProvider()
+        font_metrics = self.content_list.fontMetrics()
         for entry in entries:
             if entry.suffix.lower() != ".pdf":
                 continue
-            item = QListWidgetItem(icon_for_path(entry, icon_provider), entry.name)
-            item.setSizeHint(PDF_TILE_SIZE)
+            display_name = _wrap_pdf_filename(entry.name, font_metrics)
+            item = QListWidgetItem(icon_for_path(entry, icon_provider), display_name)
+            item.setSizeHint(
+                _pdf_tile_size(display_name, font_metrics, self.content_list.iconSize())
+            )
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             item.setData(Qt.ItemDataRole.UserRole, str(entry))
             item.setToolTip(str(entry))

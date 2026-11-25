@@ -50,7 +50,7 @@ class FolderPickerWidget(QWidget):
         buttons.addWidget(select_button)
 
         layout.addLayout(navigation)
-        layout.addWidget(CaptionLabel("Foldery"))
+        layout.addWidget(CaptionLabel("Foldery i pliki PDF"))
         layout.addWidget(self.folder_list)
         layout.addLayout(buttons)
 
@@ -64,8 +64,9 @@ class FolderPickerWidget(QWidget):
                     path
                     for path in self.current_folder.iterdir()
                     if path.is_dir()
+                    or (path.is_file() and path.suffix.lower() == ".pdf")
                 ),
-                key=lambda path: path.name.lower(),
+                key=lambda path: (not path.is_dir(), path.name.lower()),
             )
         except OSError:
             entries = []
@@ -74,6 +75,8 @@ class FolderPickerWidget(QWidget):
             item = QListWidgetItem(icon_for_path(entry, self.icon_provider), entry.name)
             item.setData(Qt.ItemDataRole.UserRole, str(entry))
             item.setToolTip(str(entry))
+            if entry.is_file():
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.folder_list.addItem(item)
 
     def _select_item(self, item: QListWidgetItem) -> None:
