@@ -817,6 +817,7 @@ dependencies = [
     { name = "pyside6-fluent-widgets", extra = ["full"] },
     { name = "pytest" },
     { name = "super-image" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -841,6 +842,7 @@ requires-dist = [
     { name = "pyside6-fluent-widgets", extras = ["full"], specifier = ">=1.11.3" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "super-image", specifier = ">=0.2.0" },
+    { name = "tqdm", specifier = ">=4.70.1" },
 ]
 
 [package.metadata.requires-dev]

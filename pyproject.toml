@@ -22,6 +22,7 @@ dependencies = [
   "pyside6-fluent-widgets[full]>=1.11.3",
   "pytest>=9.2.0",
   "super-image>=0.2.0",
+  "tqdm>=4.70.1",
 ]
 
 [project.scripts]
@@ -79,6 +80,13 @@ split-on-trailing-comma = false
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports="all"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py", "benchmark.py"]
+markers = [
+    "benchmark: opt-in, long-running image restoration benchmark",
+]
 
 [tool.rumdl]
 line-length = 99

@@ -31,13 +31,7 @@ from pdf_asset_extractor.config import (
     PDF_TILE_SIZE,
     apply_default_config,
 )
-from pdf_asset_extractor.extractor import (
-    ExtractedImage,
-    ImageConversionError,
-    PDFExtractionError,
-    encode_image,
-    extract_images_with_thumbnails,
-)
+from pdf_asset_extractor.extractor import ExtractedImage, ImageConversionError, encode_image
 from pdf_asset_extractor.image_enhancer import (
     SUPER_IMAGE_MODELS,
     EnhancementError,
@@ -48,6 +42,7 @@ from pdf_asset_extractor.image_enhancer import (
 )
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
+from pdf_asset_extractor.ui.pdf_extraction import PDFExtractionJob
 
 PDF_TILE_TEXT_WIDTH = PDF_TILE_SIZE.width() - 16
 
@@ -115,6 +110,7 @@ class MainWindow(MSFluentWindow):
         self.titleBar.setFixedHeight(45)
         self.selected_pdf: Path | None = None
         self.extracted_images: list[ExtractedImage] = []
+        self._extraction_job: PDFExtractionJob | None = None
 
         self._folder_picker = FolderPickerWidget()
         self._folder_picker.setObjectName("folderInterface")
@@ -292,15 +288,27 @@ class MainWindow(MSFluentWindow):
         if self.selected_pdf is None:
             return
 
+        if self._extraction_job is not None:
+            self._extraction_job.cancel()
+            self._extraction_job = None
+
         self.image_list.clear()
         self.extracted_images = []
         self.export_button.setEnabled(False)
-        try:
-            images = extract_images_with_thumbnails(self.selected_pdf, thumbnail_size=256)
-        except PDFExtractionError as error:
-            MessageBox("Nie można odczytać pliku PDF", str(error), self).exec()
-            return
+        job = PDFExtractionJob(self.selected_pdf, parent=self)
+        self._extraction_job = job
+        job.completed.connect(lambda images: self._show_extracted_images(job, images))
+        job.failed.connect(lambda message: self._show_extraction_error(job, message))
+        job.start()
 
+    def _show_extracted_images(
+        self, job: PDFExtractionJob, images: list[ExtractedImage]
+    ) -> None:
+        """Display images only when they belong to the currently selected PDF."""
+        if self._extraction_job is not job:
+            return
+        self._extraction_job = None
+        job.deleteLater()
         self.extracted_images = images
         for image_position, image in enumerate(images):
             pixmap = QPixmap()
@@ -328,6 +336,14 @@ class MainWindow(MSFluentWindow):
             self.image_list.addItem(QListWidgetItem("Brak osadzonych obrazów"))
         else:
             self.export_button.setEnabled(True)
+
+    def _show_extraction_error(self, job: PDFExtractionJob, message: str) -> None:
+        """Display extraction errors for the currently selected PDF."""
+        if self._extraction_job is not job:
+            return
+        self._extraction_job = None
+        job.deleteLater()
+        MessageBox("Nie można odczytać pliku PDF", message, self).exec()
 
     def _export_selected_images(self) -> None:
         """Save the selected images using the chosen output format."""
