@@ -1,3 +1,5 @@
+"""Unit and integration tests for image enhancement orchestration."""
+
 from io import BytesIO
 
 import numpy as np
@@ -7,6 +9,7 @@ import torch
 
 import pdf_asset_extractor.image_enhancer as image_enhancer
 from pdf_asset_extractor.image_enhancer import (
+    EnhancementError,
     EnhancementMethod,
     EnhancementOptions,
     ResizeMode,
@@ -21,14 +24,56 @@ class NearestUpscaler:
         return torch.nn.functional.interpolate(images, scale_factor=2, mode="nearest")
 
 
-def _encode_image(color: tuple[int, int, int]) -> bytes:
+def _encode_image(color: tuple[int, int, int], size: tuple[int, int] = (8, 8)) -> bytes:
     buffer = BytesIO()
-    Image.new("RGB", (8, 8), color=color).save(buffer, format="PNG")
+    Image.new("RGB", size, color=color).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def test_auto_device_falls_back_to_cpu_without_cuda() -> None:
+def test_resolve_device_variants() -> None:
     assert _resolve_device("auto", cuda_available=False) == "cpu"
+    assert _resolve_device("auto", cuda_available=True) == "cuda"
+    assert _resolve_device("cpu", cuda_available=True) == "cpu"
+
+    with pytest.raises(EnhancementError, match="CUDA"):
+        _resolve_device("cuda", cuda_available=False)
+
+
+def test_none_method_returns_original_bytes() -> None:
+    payload = _encode_image((10, 20, 30))
+    options = EnhancementOptions(method=EnhancementMethod.NONE)
+
+    assert enhance_image(payload, options) == payload
+    assert enhance_images([payload], options) == [payload]
+
+
+def test_enhance_images_validates_workers_and_matches_sequential() -> None:
+    batch = [_encode_image((20, 40, 60)), _encode_image((80, 100, 120))]
+    options = EnhancementOptions(method=EnhancementMethod.LANCZOS, scale=2.0)
+
+    with pytest.raises(ValueError, match="workers"):
+        enhance_images(batch, options, workers=0)
+
+    sequential = enhance_images(batch, options, workers=1)
+    threaded = enhance_images(batch, options, workers=2)
+    assert threaded == sequential
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        EnhancementOptions(method=EnhancementMethod.LANCZOS, scale=0.0),
+        EnhancementOptions(
+            method=EnhancementMethod.LANCZOS,
+            resize_mode=ResizeMode.WIDTH,
+            target_width=0,
+        ),
+        EnhancementOptions(method=EnhancementMethod.SUPER_IMAGE, scale=1.5),
+    ],
+)
+def test_invalid_enhancement_options_raise_enhancement_error(options: EnhancementOptions) -> None:
+    with pytest.raises(EnhancementError):
+        enhance_image(_encode_image((100, 100, 100)), options)
 
 
 @pytest.mark.parametrize(
@@ -58,6 +103,36 @@ def test_super_image_batch_matches_single_image_outputs(monkeypatch, device: str
         with Image.open(BytesIO(single_result)) as single_image:
             single_pixels = np.asarray(single_image)
         np.testing.assert_array_equal(batch_pixels, single_pixels)
+
+
+def test_super_image_batch_handles_mixed_dimensions_preserving_order(monkeypatch) -> None:
+    monkeypatch.setattr(
+        image_enhancer,
+        "_load_super_image_model",
+        lambda model_name, scale, device: NearestUpscaler(),
+    )
+    options = EnhancementOptions(
+        method=EnhancementMethod.SUPER_IMAGE,
+        scale=2.0,
+        model_name="edsr",
+        device="cpu",
+    )
+    inputs = [
+        _encode_image((255, 0, 0), size=(8, 6)),
+        _encode_image((0, 255, 0), size=(10, 10)),
+        _encode_image((0, 0, 255), size=(8, 6)),
+    ]
+
+    results = enhance_images(inputs, options)
+
+    expected_sizes = [(16, 12), (20, 20), (16, 12)]
+    expected_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    for result, expected_size, expected_color in zip(
+        results, expected_sizes, expected_colors, strict=True
+    ):
+        with Image.open(BytesIO(result)) as enhanced:
+            assert enhanced.size == expected_size
+            assert np.all(np.asarray(enhanced) == np.array(expected_color, dtype=np.uint8))
 
 
 def test_lanczos_enhancement_resizes_without_pil_resize(monkeypatch) -> None:

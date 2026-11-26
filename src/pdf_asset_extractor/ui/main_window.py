@@ -1,5 +1,9 @@
+"""Main desktop window for browsing PDFs and exporting embedded images."""
+
+import os
 from pathlib import Path
 import sys
+from typing import Final
 
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
@@ -38,13 +42,37 @@ from pdf_asset_extractor.image_enhancer import (
     EnhancementMethod,
     EnhancementOptions,
     ResizeMode,
-    enhance_image,
+    enhance_images,
 )
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
 from pdf_asset_extractor.ui.pdf_extraction import PDFExtractionJob
 
-PDF_TILE_TEXT_WIDTH = PDF_TILE_SIZE.width() - 16
+PDF_TILE_TEXT_WIDTH: Final[int] = PDF_TILE_SIZE.width() - 16
+ENHANCEMENT_METHODS: Final[tuple[tuple[str, EnhancementMethod], ...]] = (
+    ("Bez poprawy", EnhancementMethod.NONE),
+    ("Skalowanie Lanczosem", EnhancementMethod.LANCZOS),
+    ("Wyostrzanie maską", EnhancementMethod.UNSHARP_MASK),
+    ("Super-image", EnhancementMethod.SUPER_IMAGE),
+)
+OUTPUT_FORMAT_MAP: Final[dict[str, str]] = {
+    "Oryginalny": "original",
+    "PNG": "png",
+    "JPEG": "jpg",
+}
+DEVICE_MAP: Final[dict[str, str]] = {
+    "Auto": "auto",
+    "CPU": "cpu",
+    "CUDA": "cuda",
+}
+
+
+def _parse_unsharp_preset(preset: str) -> tuple[float, int, int]:
+    """Parse a 'radius / percent / threshold' preset label into numeric values."""
+    parts = [part.strip() for part in preset.split("/")]
+    if len(parts) != 3:
+        raise ValueError(f"Invalid unsharp mask preset: {preset}")
+    return float(parts[0]), int(parts[1]), int(parts[2])
 
 
 def _fit_thumbnail(pixmap: QPixmap, size: QSize) -> QPixmap:
@@ -104,6 +132,7 @@ class MainWindow(MSFluentWindow):
         self.init_window()
 
     def init_window(self) -> None:
+        """Initialize window layout, widgets, and navigation views."""
         self.resize(1024, 768)
         self.setWindowTitle("PDF Asset Extractor")
         self.setWindowIcon(QIcon(str(LOGO_PATH)))
@@ -111,6 +140,21 @@ class MainWindow(MSFluentWindow):
         self.selected_pdf: Path | None = None
         self.extracted_images: list[ExtractedImage] = []
         self._extraction_job: PDFExtractionJob | None = None
+
+        # Instantiate view widgets upfront so every attribute is initialized cleanly.
+        self.folder_label = StrongBodyLabel()
+        self.content_list = ListWidget()
+        self.selected_pdf_label = StrongBodyLabel("Nie wybrano pliku PDF")
+        self.image_list = ListWidget()
+        self.enhancement_combo: ComboBox = ComboBox()
+        self.enhancement_resize_mode_combo: ComboBox = ComboBox()
+        self.enhancement_scale_combo: ComboBox = ComboBox()
+        self.enhancement_width_combo: ComboBox = ComboBox()
+        self.enhancement_model_combo: ComboBox = ComboBox()
+        self.enhancement_device_combo: ComboBox = ComboBox()
+        self.enhancement_unsharp_combo: ComboBox = ComboBox()
+        self.output_format_combo = ComboBox()
+        self.export_button = PushButton("Eksportuj zaznaczone obrazy")
 
         self._folder_picker = FolderPickerWidget()
         self._folder_picker.setObjectName("folderInterface")
@@ -134,7 +178,7 @@ class MainWindow(MSFluentWindow):
             try:
                 self.windowEffect.setAcrylicEffect(self.winId())
             except Exception as error:
-                print(f"Nie udało się wyłączyć efektu akrylowego: {error}")
+                print(f"Nie udało się włączyć efektu akrylowego: {error}")
 
     def _create_content_view(self) -> QWidget:
         view = QWidget()
@@ -142,14 +186,12 @@ class MainWindow(MSFluentWindow):
         layout.setContentsMargins(24, 24, 24, 24)
 
         header_layout = QHBoxLayout()
-        self.folder_label = StrongBodyLabel()
         self.folder_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         choose_button = PushButton(FluentIcon.FOLDER_ADD, "Wybierz inny folder")
         choose_button.clicked.connect(self.open_folder)
         header_layout.addWidget(self.folder_label, 1)
         header_layout.addWidget(choose_button)
 
-        self.content_list = ListWidget()
         self.content_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.content_list.setIconSize(QSize(64, 64))
         self.content_list.setGridSize(QSize())
@@ -170,12 +212,10 @@ class MainWindow(MSFluentWindow):
         layout = QVBoxLayout(view)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.addWidget(CaptionLabel("Wybrany plik PDF"))
-        self.selected_pdf_label = StrongBodyLabel("Nie wybrano pliku PDF")
         self.selected_pdf_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.selected_pdf_label)
-        self.image_list = ListWidget()
         self.image_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.image_list.setIconSize(QSize(192, 192))
         self.image_list.setGridSize(QSize(240, 240))
@@ -183,6 +223,7 @@ class MainWindow(MSFluentWindow):
         self.image_list.setMovement(QListWidget.Movement.Static)
         self.image_list.setSpacing(12)
         self.image_list.setWordWrap(True)
+        # ExtendedSelection enables Ctrl/Shift multi-select for batch export.
         self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.image_list, 1)
 
@@ -190,28 +231,17 @@ class MainWindow(MSFluentWindow):
         enhancement_options.addWidget(CaptionLabel("Poprawa zaznaczonych obrazów"))
         enhancement_row = QHBoxLayout()
         enhancement_row.addWidget(CaptionLabel("Metoda"))
-        self.enhancement_combo: ComboBox = ComboBox()
-        self.enhancement_combo.addItems(
-            [
-                "Bez poprawy",
-                "Skalowanie Lanczosem",
-                "Wyostrzanie maską",
-                "Super-image",
-            ]
-        )
+        self.enhancement_combo.addItems([label for label, _ in ENHANCEMENT_METHODS])
         self.enhancement_combo.currentIndexChanged.connect(self._update_enhancement_controls)
         enhancement_row.addWidget(self.enhancement_combo)
         enhancement_row.addWidget(CaptionLabel("Tryb rozmiaru"))
-        self.enhancement_resize_mode_combo: ComboBox = ComboBox()
         self.enhancement_resize_mode_combo.addItems(["Współczynnik", "Szerokość docelowa"])
         self.enhancement_resize_mode_combo.currentIndexChanged.connect(
             self._update_enhancement_controls
         )
         enhancement_row.addWidget(self.enhancement_resize_mode_combo)
         enhancement_row.addWidget(CaptionLabel("Wartość"))
-        self.enhancement_scale_combo: ComboBox = ComboBox()
         self.enhancement_scale_combo.addItems(["1.5x", "2x", "4x"])
-        self.enhancement_width_combo: ComboBox = ComboBox()
         self.enhancement_width_combo.addItems(["1000 px", "1500 px", "2000 px", "3000 px"])
         enhancement_row.addWidget(self.enhancement_scale_combo)
         enhancement_row.addWidget(self.enhancement_width_combo)
@@ -220,15 +250,12 @@ class MainWindow(MSFluentWindow):
 
         model_row = QHBoxLayout()
         model_row.addWidget(CaptionLabel("Model"))
-        self.enhancement_model_combo: ComboBox = ComboBox()
         self.enhancement_model_combo.addItems([name for name, _ in SUPER_IMAGE_MODELS])
         model_row.addWidget(self.enhancement_model_combo)
         model_row.addWidget(CaptionLabel("Urządzenie"))
-        self.enhancement_device_combo: ComboBox = ComboBox()
-        self.enhancement_device_combo.addItems(["Auto", "CPU", "CUDA"])
+        self.enhancement_device_combo.addItems(list(DEVICE_MAP))
         model_row.addWidget(self.enhancement_device_combo)
         model_row.addWidget(CaptionLabel("Maska"))
-        self.enhancement_unsharp_combo: ComboBox = ComboBox()
         self.enhancement_unsharp_combo.addItems(["1 / 100 / 0", "2 / 150 / 3", "3 / 200 / 5"])
         model_row.addWidget(self.enhancement_unsharp_combo)
         model_row.addStretch()
@@ -243,13 +270,11 @@ class MainWindow(MSFluentWindow):
 
         export_options = QHBoxLayout()
         export_options.addWidget(CaptionLabel("Format wyjściowy"))
-        self.output_format_combo = ComboBox()
-        self.output_format_combo.addItems(["Oryginalny", "PNG", "JPEG"])
+        self.output_format_combo.addItems(list(OUTPUT_FORMAT_MAP))
         export_options.addWidget(self.output_format_combo)
         export_options.addStretch()
         layout.addLayout(export_options)
 
-        self.export_button = PushButton("Eksportuj zaznaczone obrazy")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_selected_images)
         layout.addWidget(self.export_button)
@@ -258,22 +283,48 @@ class MainWindow(MSFluentWindow):
 
     def _update_enhancement_controls(self) -> None:
         """Enable only controls supported by the selected enhancement backend."""
-        method_index = self.enhancement_combo.currentIndex()
-        uses_scaling = method_index in {1, 3}
-        uses_width = method_index in {1, 3}
-        super_image_selected = method_index == 3
+        method = ENHANCEMENT_METHODS[self.enhancement_combo.currentIndex()][1]
+        uses_scaling = method in {EnhancementMethod.LANCZOS, EnhancementMethod.SUPER_IMAGE}
+        super_image_selected = method is EnhancementMethod.SUPER_IMAGE
+
+        # Pretrained super-image models only support integer 2x/4x scales, not 1.5x.
         self.enhancement_scale_combo.setItemEnabled(0, not super_image_selected)
         if super_image_selected and self.enhancement_scale_combo.currentIndex() == 0:
             self.enhancement_scale_combo.setCurrentIndex(1)
-        uses_width_mode = uses_width and self.enhancement_resize_mode_combo.currentIndex() == 1
-        self.enhancement_resize_mode_combo.setEnabled(uses_width)
+
+        uses_width_mode = uses_scaling and self.enhancement_resize_mode_combo.currentIndex() == 1
+        self.enhancement_resize_mode_combo.setEnabled(uses_scaling)
         self.enhancement_scale_combo.setEnabled(uses_scaling and not uses_width_mode)
         self.enhancement_width_combo.setEnabled(uses_width_mode)
-        self.enhancement_model_combo.setEnabled(method_index == 3)
-        self.enhancement_device_combo.setEnabled(method_index == 3)
-        self.enhancement_unsharp_combo.setEnabled(method_index == 2)
+        self.enhancement_model_combo.setEnabled(super_image_selected)
+        self.enhancement_device_combo.setEnabled(super_image_selected)
+        self.enhancement_unsharp_combo.setEnabled(method is EnhancementMethod.UNSHARP_MASK)
+
+    def _current_enhancement_options(self) -> EnhancementOptions:
+        """Build an EnhancementOptions snapshot from the active UI controls."""
+        method = ENHANCEMENT_METHODS[self.enhancement_combo.currentIndex()][1]
+        resize_mode = (
+            ResizeMode.WIDTH
+            if self.enhancement_resize_mode_combo.currentIndex() == 1
+            else ResizeMode.FACTOR
+        )
+        radius, percent, threshold = _parse_unsharp_preset(
+            self.enhancement_unsharp_combo.currentText()
+        )
+        return EnhancementOptions(
+            method=method,
+            resize_mode=resize_mode,
+            scale=float(self.enhancement_scale_combo.currentText().removesuffix("x")),
+            target_width=int(self.enhancement_width_combo.currentText().removesuffix(" px")),
+            model_name=self.enhancement_model_combo.currentText(),
+            device=DEVICE_MAP[self.enhancement_device_combo.currentText()],
+            unsharp_radius=radius,
+            unsharp_percent=percent,
+            unsharp_threshold=threshold,
+        )
 
     def open_folder(self) -> None:
+        """Switch back to the embedded folder picker view."""
         self.switchTo(self._folder_picker)
 
     def _select_pdf(self, item: QListWidgetItem) -> None:
@@ -301,10 +352,9 @@ class MainWindow(MSFluentWindow):
         job.failed.connect(lambda message: self._show_extraction_error(job, message))
         job.start()
 
-    def _show_extracted_images(
-        self, job: PDFExtractionJob, images: list[ExtractedImage]
-    ) -> None:
+    def _show_extracted_images(self, job: PDFExtractionJob, images: list[ExtractedImage]) -> None:
         """Display images only when they belong to the currently selected PDF."""
+        # Guard against stale signals arriving after the user switched to another PDF.
         if self._extraction_job is not job:
             return
         self._extraction_job = None
@@ -346,7 +396,7 @@ class MainWindow(MSFluentWindow):
         MessageBox("Nie można odczytać pliku PDF", message, self).exec()
 
     def _export_selected_images(self) -> None:
-        """Save the selected images using the chosen output format."""
+        """Save the selected images using the chosen enhancement and output format."""
         selected_items = self.image_list.selectedItems()
         if not selected_items:
             MessageBox("Brak zaznaczenia", "Zaznacz co najmniej jeden obraz.", self).exec()
@@ -356,38 +406,22 @@ class MainWindow(MSFluentWindow):
         if not output_path:
             return
 
-        output_format = {"Oryginalny": "original", "PNG": "png", "JPEG": "jpg"}.get(
-            self.output_format_combo.currentText(), "original"
-        )
-        enhancement_method = {
-            0: EnhancementMethod.NONE,
-            1: EnhancementMethod.LANCZOS,
-            2: EnhancementMethod.UNSHARP_MASK,
-            3: EnhancementMethod.SUPER_IMAGE,
-        }[self.enhancement_combo.currentIndex()]
-        resize_mode = (
-            ResizeMode.WIDTH
-            if self.enhancement_resize_mode_combo.currentIndex() == 1
-            else ResizeMode.FACTOR
-        )
-        enhancement_options = EnhancementOptions(
-            method=enhancement_method,
-            resize_mode=resize_mode,
-            scale=float(self.enhancement_scale_combo.currentText().removesuffix("x")),
-            target_width=int(self.enhancement_width_combo.currentText().removesuffix(" px")),
-            model_name=self.enhancement_model_combo.currentText(),
-            device={"Auto": "auto", "CPU": "cpu", "CUDA": "cuda"}[
-                self.enhancement_device_combo.currentText()
-            ],
-            unsharp_radius=float(self.enhancement_unsharp_combo.currentText().split(" / ")[0]),
-            unsharp_percent=int(self.enhancement_unsharp_combo.currentText().split(" / ")[1]),
-            unsharp_threshold=int(self.enhancement_unsharp_combo.currentText().split(" / ")[2]),
-        )
+        destination = Path(output_path)
+        output_format = OUTPUT_FORMAT_MAP.get(self.output_format_combo.currentText(), "original")
+        enhancement_options = self._current_enhancement_options()
+        selected_images = [
+            self.extracted_images[item.data(Qt.ItemDataRole.UserRole)] for item in selected_items
+        ]
+
         try:
-            for item in selected_items:
-                image = self.extracted_images[item.data(Qt.ItemDataRole.UserRole)]
-                enhanced_data = enhance_image(image.data, enhancement_options)
-                if enhancement_method is EnhancementMethod.NONE:
+            workers = min(len(selected_images), os.cpu_count() or 1)
+            enhanced_batch = enhance_images(
+                [image.data for image in selected_images],
+                enhancement_options,
+                workers=workers,
+            )
+            for image, enhanced_data in zip(selected_images, enhanced_batch, strict=True):
+                if enhancement_options.method is EnhancementMethod.NONE:
                     image_data, extension = encode_image(image, output_format)
                 else:
                     enhanced_image = ExtractedImage(
@@ -400,18 +434,18 @@ class MainWindow(MSFluentWindow):
                         thumbnail=image.thumbnail,
                     )
                     image_data, extension = encode_image(enhanced_image, output_format)
+
                 filename = (
-                    f"page-{image.page_number:04d}-image-"
-                    f"{image.image_index:04d}.{extension}"
+                    f"page-{image.page_number:04d}-image-{image.image_index:04d}.{extension}"
                 )
-                (Path(output_path) / filename).write_bytes(image_data)
+                (destination / filename).write_bytes(image_data)
         except (EnhancementError, ImageConversionError, OSError) as error:
             MessageBox("Eksport nie powiódł się", str(error), self).exec()
             return
 
         MessageBox(
             "Eksport zakończony",
-            f"Zapisano {len(selected_items)} obrazów w folderze {output_path}.",
+            f"Zapisano {len(selected_images)} obrazów w folderze {output_path}.",
             self,
         ).exec()
 
@@ -448,6 +482,7 @@ class MainWindow(MSFluentWindow):
 
 
 def main() -> int:
+    """Launch the Qt desktop application."""
     app = QApplication(sys.argv)
     apply_default_config()
     window = MainWindow()

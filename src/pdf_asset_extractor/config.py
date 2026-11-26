@@ -1,4 +1,4 @@
-"""Application defaults built off top of QFluentWidgets."""
+"""Application defaults built on top of QFluentWidgets."""
 
 from pathlib import Path
 import sys
@@ -15,9 +15,11 @@ DEFAULT_FONT_FAMILIES: Final[list[str]] = [
     "PingFang SC",
 ]
 DEFAULT_THEME: Final[Theme] = Theme.AUTO
+# Native accent queries are only supported by qframelesswindow on Windows and macOS.
 ACCENT_COLOR: Final[QColor] = (
-    getSystemAccentColor() if sys.platform in ["win32", "darwin"] else QColor("#0078D4")
+    getSystemAccentColor() if sys.platform in {"win32", "darwin"} else QColor("#0078D4")
 )
+# Acrylic window backdrop is a Windows DWM feature.
 ACRYLIC_ENABLED: Final[bool] = sys.platform == "win32"
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 LOGO_PATH = BASE_DIR / "assets" / "logo.svg"

@@ -39,9 +39,11 @@ pdf-asset-extractor/
 ├── tests/
 │   ├── conftest.py                  # Custom pytest CLI flags for the benchmark
 │   ├── benchmark.py                 # Opt-in restoration benchmark (MSE, MAE, PSNR)
+│   ├── test_extractor.py            # Unit tests for PDF extraction, encoding, and worker CLI
 │   ├── test_image_processing.py     # Unit tests for manual Lanczos-3 and unsharp mask
 │   ├── test_image_enhancer.py       # Integration tests for the enhancement pipeline
-│   └── test_pdf_extraction_job.py   # Subprocess extraction and timeout tests
+│   ├── test_pdf_extraction_job.py   # Subprocess extraction and timeout tests
+│   └── test_ui_helpers.py           # Unit tests for UI helpers and FolderPickerWidget
 ├── pyproject.toml                   # Project metadata, dependencies, and tool configuration
 └── README.md                        # Project overview and benchmark usage
 ```

@@ -73,9 +73,7 @@ class PDFExtractionJob(QObject):
         if error is QProcess.ProcessError.FailedToStart:
             self._finish_with_error("Nie udało się uruchomić procesu odczytu PDF.")
 
-    def _handle_finished(
-        self, exit_code: int, exit_status: QProcess.ExitStatus
-    ) -> None:
+    def _handle_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         self._timeout_timer.stop()
         if self._timed_out:
             self._finish_with_error(
@@ -86,9 +84,11 @@ class PDFExtractionJob(QObject):
             self._finish_with_error("Odczyt pliku PDF został anulowany.")
             return
         if exit_status is not QProcess.ExitStatus.NormalExit or exit_code != 0:
-            message = bytes(self._process.readAllStandardError().data()).decode(
-                "utf-8", errors="replace"
-            ).strip()
+            message = (
+                bytes(self._process.readAllStandardError().data())
+                .decode("utf-8", errors="replace")
+                .strip()
+            )
             self._finish_with_error(message or "Nie udało się odczytać pliku PDF.")
             return
 
@@ -126,11 +126,10 @@ class PDFExtractionJob(QObject):
         return images
 
     def _finish_with_error(self, message: str) -> None:
-        if self._finished:
-            return
         self._finish(message)
 
     def _finish(self, result: list[ExtractedImage] | str) -> None:
+        """Emit a terminal signal once and always clean up the worker directory."""
         if self._finished:
             return
         self._finished = True

@@ -40,6 +40,8 @@ Handles embedded PDF image extraction, thumbnail generation, and export format e
     `"original"` or re-encodes via `fitz.Pixmap` to `"png"` or `"jpg"` (stripping alpha and
     converting non-RGB colorspaces to RGB for JPEG).
 - **Internal helpers**:
+  - `_ensure_png_compatible(pixmap, *, drop_alpha=False)` — converts non-grayscale/non-RGB
+    colorspaces (such as CMYK) to RGB before PNG encoding.
   - `_thumbnail(image_data, max_size)` — builds a PNG thumbnail using power-of-two downsampling
     (`fitz.Pixmap.shrink`).
   - `_output_paths(output_dir, page_number, image_index, extension)` — produces deterministic
@@ -69,12 +71,12 @@ Low-level module containing from-scratch NumPy implementations of resampling and
     channel preservation.
 - **Internal helpers**:
   - `_normalize_image_mode`, `_to_float_channels`, `_from_float_channels` — safe conversion
-    between `PIL.Image.Image` (including `P`, `1`, and `CMYK` modes) and contiguous `float64`
+    between `PIL.Image.Image` (including `P`, `1`, and `CMYK` modes) and contiguous `float32`
     `(H, W, C)` arrays.
-  - `_sinc`, `_lanczos_kernel`, `_lanczos_weights`, `_resample_horizontal`, `_resample_vertical`
-    — mathematical primitives and 1D passes for Lanczos resampling.
-  - `_gaussian_kernel_1d`, `_gaussian_blur` — 1D Gaussian kernel construction and separable 2D
-    convolution.
+  - `_sinc`, `_lanczos_kernel`, `_lanczos_weights`, `_resample_axis` — `float64` mathematical
+    primitives and reusable-buffer 1D passes for Lanczos resampling.
+  - `_gaussian_kernel_1d`, `_gaussian_blur` — `float64` 1D Gaussian kernel construction and
+    reusable-buffer separable 2D convolution.
 
 ### `image_enhancer.py`
 
@@ -98,8 +100,9 @@ High-level orchestration layer for enhancing extracted images before export.
     `ThreadPoolExecutor` parallelism.
 - **Internal helpers**:
   - `_resize_dimensions` — computes aspect-preserving `(width, height)`.
-  - `_enhance_with_super_image`, `_enhance_with_super_image_batch` — tensor batching, PyTorch
-    inference, output conversion, and optional width fitting via `lanczos_resize`.
+  - `_enhance_with_super_image`, `_enhance_with_super_image_batch` — dimension-grouped tensor
+    batching (preserving input order), PyTorch inference, rounded uint8 conversion, and optional
+    width fitting via `lanczos_resize`.
   - `_resolve_device`, `_load_super_image_model` — device selection and model caching
     (`@lru_cache(maxsize=1)`).
 
@@ -119,7 +122,9 @@ Main desktop window (`MainWindow(MSFluentWindow)`) and application entry functio
 - Dynamically enables/disables option controls (`_update_enhancement_controls`) based on the
   active method (e.g., disables `1.5x` when `Super-image` is selected; enables the mask preset
   combo only for unsharp mask).
-- Runs per-image enhancement, format conversion, and disk export in `_export_selected_images`.
+- Runs batched enhancement (`enhance_images`), format conversion, and disk export in
+  `_export_selected_images`, building options through `_current_enhancement_options` and
+  `_parse_unsharp_preset`.
 
 ### `ui/folder_picker.py`
 
@@ -153,11 +158,15 @@ Asynchronous extraction controller (`PDFExtractionJob(QObject)`).
 - `tests/benchmark.py` — opt-in restoration benchmark comparing `lanczos` against `super-image`
   models (`drln-bam`, `edsr`, `msrn`) at 2x and 4x with per-image MSE, MAE, and PSNR written to
   CSV, plus unit tests for option parsing and unreadable image handling.
+- `tests/test_extractor.py` — unit tests for multi-page extraction, password-protected PDFs,
+  corrupt PDF errors, `encode_image` (including RGBA/CMYK handling), and `extraction_worker` CLI.
 - `tests/test_image_processing.py` — unit tests for manual Lanczos-3 and unsharp mask (kernel
   properties, closeness to Pillow reference output, premultiplied alpha, threshold behavior,
   argument validation, and image mode handling).
 - `tests/test_image_enhancer.py` — integration tests for `enhance_image` / `enhance_images`
-  (including assertions that `PIL.Image.resize` and `PIL.Image.filter` are never invoked, batch vs.
-  single `super-image` equivalence, and CPU fallback).
+  (including assertions that `PIL.Image.resize` and `PIL.Image.filter` are never invoked,
+  multithreaded CPU batching, mixed-dimension `super-image` batching, and CPU fallback).
 - `tests/test_pdf_extraction_job.py` — end-to-end tests for `PDFExtractionJob` extraction output
   and forced timeout process termination.
+- `tests/test_ui_helpers.py` — unit tests for `icon_for_path`, `_parse_unsharp_preset`,
+  `_wrap_pdf_filename`, `_fit_thumbnail`, and `FolderPickerWidget` navigation/selection.

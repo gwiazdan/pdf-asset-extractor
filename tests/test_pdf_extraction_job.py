@@ -1,17 +1,24 @@
 from io import BytesIO
+import os
 from pathlib import Path
 
 from PIL import Image
 import pymupdf as fitz
-from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
 import pytest
 
 from pdf_asset_extractor.ui.pdf_extraction import PDFExtractionJob
 
 
 @pytest.fixture(scope="module", autouse=True)
-def qt_application() -> QCoreApplication:
-    return QCoreApplication.instance() or QCoreApplication([])
+def qt_application() -> QApplication:
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    existing = QApplication.instance()
+    if isinstance(existing, QApplication):
+        return existing
+    return QApplication([])
 
 
 def _create_pdf(path: Path) -> None:

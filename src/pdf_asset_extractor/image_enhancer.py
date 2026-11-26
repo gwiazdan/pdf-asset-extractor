@@ -1,5 +1,6 @@
 """Batch image enhancement primitives used before export."""
 
+from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -7,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache, partial
 from io import BytesIO
+from typing import Any, Protocol, cast
 
 import numpy as np
 from PIL import Image
@@ -36,6 +38,12 @@ class ResizeMode(StrEnum):
 
     FACTOR = "factor"
     WIDTH = "width"
+
+
+class _SuperImageModel(Protocol):
+    """Minimal callable interface satisfied by pretrained super-image models."""
+
+    def __call__(self, inputs: Any) -> Any: ...
 
 
 SUPER_IMAGE_MODELS: tuple[tuple[str, str], ...] = (
@@ -70,17 +78,18 @@ def enhance_image(image_data: bytes, options: EnhancementOptions) -> bytes:
 
     try:
         with Image.open(BytesIO(image_data)) as source:
-            image = source.copy()
             if options.method is EnhancementMethod.LANCZOS:
-                size = _resize_dimensions(image, options)
-                image = lanczos_resize(image, size)
+                size = _resize_dimensions(source, options)
+                image = lanczos_resize(source, size)
             elif options.method is EnhancementMethod.UNSHARP_MASK:
                 image = unsharp_mask(
-                    image,
+                    source,
                     radius=options.unsharp_radius,
                     percent=options.unsharp_percent,
                     threshold=options.unsharp_threshold,
                 )
+            else:
+                image = source
 
             output = BytesIO()
             image.save(output, format="PNG")
@@ -100,11 +109,14 @@ def enhance_images(
         raise ValueError("workers must be greater than zero")
     if not image_data_batch:
         return []
+    if options.method is EnhancementMethod.NONE:
+        return list(image_data_batch)
     if options.method is EnhancementMethod.SUPER_IMAGE:
         return _enhance_with_super_image_batch(image_data_batch, options)
     if workers == 1:
         return [enhance_image(image_data, options) for image_data in image_data_batch]
 
+    # NumPy array ops in image_processing release the GIL, so threads scale on CPU batches.
     with ThreadPoolExecutor(max_workers=workers) as executor:
         return list(
             executor.map(
@@ -139,10 +151,11 @@ def _enhance_with_super_image(image_data: bytes, options: EnhancementOptions) ->
 def _enhance_with_super_image_batch(
     image_data_batch: Sequence[bytes], options: EnhancementOptions
 ) -> list[bytes]:
-    """Upscale same-sized images together with one cached super-image model."""
+    """Upscale images with one cached super-image model, batching same-sized inputs."""
     if options.scale not in {2.0, 3.0, 4.0}:
         raise EnhancementError("super-image obsługuje skale modeli 2x, 3x lub 4x.")
 
+    # Lazy import avoids pulling PyTorch into memory when users only run CPU filters.
     try:
         from super_image import ImageLoader
         import torch
@@ -165,30 +178,38 @@ def _enhance_with_super_image_batch(
             rgb_images = [
                 stack.enter_context(source_image.convert("RGB")) for source_image in source_images
             ]
-            if len({image.size for image in rgb_images}) != 1:
-                raise ValueError("All images in a super-image batch must have equal dimensions.")
 
-            inputs = torch.cat(
-                [ImageLoader.load_image(image) for image in rgb_images],
-                dim=0,
-            ).to(device)
-            with torch.inference_mode():
-                output = model(inputs)
-            if not isinstance(output, torch.Tensor) or output.shape[0] != len(image_data_batch):
-                raise ValueError("The selected model returned an invalid batch.")
-            output_array = output.clamp(0, 1).detach().cpu().numpy().transpose(0, 2, 3, 1)
+            # Group by dimensions so heterogeneous PDF selections can still batch safely.
+            size_groups: dict[tuple[int, int], list[int]] = defaultdict(list)
+            for index, rgb_image in enumerate(rgb_images):
+                size_groups[rgb_image.size].append(index)
 
-            encoded_images: list[bytes] = []
-            for image_array in output_array:
-                enhanced_image = Image.fromarray(np.uint8(image_array * 255))
-                if options.resize_mode is ResizeMode.WIDTH:
-                    target_size = _resize_dimensions(enhanced_image, options)
-                    enhanced_image = lanczos_resize(enhanced_image, target_size)
+            encoded_images: list[bytes | None] = [None] * len(image_data_batch)
+            for indices in size_groups.values():
+                group_tensors = [
+                    # Upstream super_image mis-annotates load_image(image: PIL.Image) as module.
+                    ImageLoader.load_image(cast(Any, rgb_images[index]))
+                    for index in indices
+                ]
+                inputs = torch.cat(group_tensors, dim=0).to(device)
+                with torch.inference_mode():
+                    output = model(inputs)
+                if not isinstance(output, torch.Tensor) or output.shape[0] != len(indices):
+                    raise ValueError("The selected model returned an invalid batch.")
 
-                encoded = BytesIO()
-                enhanced_image.save(encoded, format="PNG")
-                encoded_images.append(encoded.getvalue())
-            return encoded_images
+                output_array = output.clamp(0, 1).detach().cpu().numpy().transpose(0, 2, 3, 1)
+                for original_index, image_array in zip(indices, output_array, strict=True):
+                    enhanced_pixels = np.rint(image_array * 255.0).astype(np.uint8)
+                    enhanced_image = Image.fromarray(enhanced_pixels)
+                    if options.resize_mode is ResizeMode.WIDTH:
+                        target_size = _resize_dimensions(enhanced_image, options)
+                        enhanced_image = lanczos_resize(enhanced_image, target_size)
+
+                    encoded = BytesIO()
+                    enhanced_image.save(encoded, format="PNG")
+                    encoded_images[original_index] = encoded.getvalue()
+
+            return [payload for payload in encoded_images if payload is not None]
     except torch.cuda.OutOfMemoryError as error:
         raise EnhancementOutOfMemoryError(
             "The super-image batch exceeded available CUDA memory."
@@ -209,7 +230,7 @@ def _resolve_device(requested_device: str, cuda_available: bool) -> str:
 
 
 @lru_cache(maxsize=1)
-def _load_super_image_model(model_name: str, scale: int, device: str) -> object:
+def _load_super_image_model(model_name: str, scale: int, device: str) -> _SuperImageModel:
     """Load and cache one pretrained super-image model."""
     try:
         import super_image

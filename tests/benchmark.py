@@ -6,6 +6,7 @@ from io import BytesIO
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TypedDict
 
 import numpy as np
 from PIL import Image
@@ -139,8 +140,7 @@ def _parse_models(value: str) -> list[str]:
     unknown_models = sorted(set(models) - set(available_models))
     if not models or unknown_models:
         raise pytest.UsageError(
-            "Use 'all', 'none', or valid model identifiers; "
-            f"unknown identifiers: {unknown_models}"
+            f"Use 'all', 'none', or valid model identifiers; unknown identifiers: {unknown_models}"
         )
     return models
 
@@ -197,6 +197,63 @@ def test_prepare_samples_records_unreadable_images(tmp_path: Path) -> None:
     assert not samples
     assert set(failures) == {(image_path, 2), (image_path, 4)}
     assert all("truncated" in message.lower() for message in failures.values())
+
+
+class BenchmarkRow(TypedDict):
+    """Typed CSV row for one benchmark measurement."""
+
+    image: str
+    scale: int
+    method: str
+    model: str
+    width: int | str
+    height: int | str
+    mse: float | str
+    mae: float | str
+    psnr: float | str
+    error: str
+
+
+BENCHMARK_FIELDNAMES: tuple[str, ...] = (
+    "image",
+    "scale",
+    "method",
+    "model",
+    "width",
+    "height",
+    "mse",
+    "mae",
+    "psnr",
+    "error",
+)
+
+
+def _benchmark_row(
+    *,
+    image: str,
+    scale: int,
+    method: EnhancementMethod,
+    model: str,
+    width: int | str = "",
+    height: int | str = "",
+    mse: float | str = "",
+    mae: float | str = "",
+    psnr: float | str = "",
+    error: str = "",
+) -> BenchmarkRow:
+    """Build a normalized CSV row for benchmark results or failures."""
+    return {
+        "image": image,
+        "scale": scale,
+        "method": method.value,
+        "model": model,
+        "width": width,
+        "height": height,
+        "mse": mse,
+        "mae": mae,
+        "psnr": psnr,
+        "error": error,
+    }
 
 
 def _reconstruction_metrics(reference: Image.Image, result: bytes) -> tuple[float, float, float]:
@@ -258,20 +315,9 @@ def test_restoration_benchmark(request) -> None:
         samples_by_key = {(sample.image_path, sample.scale): sample for sample in samples}
 
         with output_path.open("w", newline="", encoding="utf-8") as csv_file:
-            writer = csv.DictWriter(
+            writer: csv.DictWriter[str] = csv.DictWriter(
                 csv_file,
-                fieldnames=(
-                    "image",
-                    "scale",
-                    "method",
-                    "model",
-                    "width",
-                    "height",
-                    "mse",
-                    "mae",
-                    "psnr",
-                    "error",
-                ),
+                fieldnames=BENCHMARK_FIELDNAMES,
             )
             writer.writeheader()
 
@@ -293,31 +339,23 @@ def test_restoration_benchmark(request) -> None:
                         for image_path in image_paths:
                             sample = samples_by_key.get((image_path, scale))
                             if sample is None:
-                                row: dict[str, object] = {
-                                    "image": image_path.name,
-                                    "scale": scale,
-                                    "method": method.value,
-                                    "model": model_name,
-                                    "width": "",
-                                    "height": "",
-                                    "mse": "",
-                                    "mae": "",
-                                    "psnr": "",
-                                    "error": preparation_failures[(image_path, scale)],
-                                }
+                                row = _benchmark_row(
+                                    image=image_path.name,
+                                    scale=scale,
+                                    method=method,
+                                    model=model_name,
+                                    error=preparation_failures[(image_path, scale)],
+                                )
                             elif configuration_failure is not None:
-                                row = {
-                                    "image": image_path.name,
-                                    "scale": scale,
-                                    "method": method.value,
-                                    "model": model_name,
-                                    "width": sample.width,
-                                    "height": sample.height,
-                                    "mse": "",
-                                    "mae": "",
-                                    "psnr": "",
-                                    "error": configuration_failure,
-                                }
+                                row = _benchmark_row(
+                                    image=image_path.name,
+                                    scale=scale,
+                                    method=method,
+                                    model=model_name,
+                                    width=sample.width,
+                                    height=sample.height,
+                                    error=configuration_failure,
+                                )
                             else:
                                 try:
                                     enhanced = enhance_image(
@@ -328,36 +366,30 @@ def test_restoration_benchmark(request) -> None:
                                     raise
                                 except EnhancementError as error:
                                     configuration_failure = str(error)
-                                    row = {
-                                        "image": image_path.name,
-                                        "scale": scale,
-                                        "method": method.value,
-                                        "model": model_name,
-                                        "width": sample.width,
-                                        "height": sample.height,
-                                        "mse": "",
-                                        "mae": "",
-                                        "psnr": "",
-                                        "error": configuration_failure,
-                                    }
+                                    row = _benchmark_row(
+                                        image=image_path.name,
+                                        scale=scale,
+                                        method=method,
+                                        model=model_name,
+                                        width=sample.width,
+                                        height=sample.height,
+                                        error=configuration_failure,
+                                    )
                                 else:
                                     with Image.open(sample.image_path) as source:
                                         reference = source.convert("RGB")
-                                    mse, mae, psnr = _reconstruction_metrics(
-                                        reference, enhanced
+                                    mse, mae, psnr = _reconstruction_metrics(reference, enhanced)
+                                    row = _benchmark_row(
+                                        image=sample.image_path.name,
+                                        scale=scale,
+                                        method=method,
+                                        model=model_name,
+                                        width=sample.width,
+                                        height=sample.height,
+                                        mse=mse,
+                                        mae=mae,
+                                        psnr=psnr,
                                     )
-                                    row = {
-                                        "image": sample.image_path.name,
-                                        "scale": scale,
-                                        "method": method.value,
-                                        "model": model_name,
-                                        "width": sample.width,
-                                        "height": sample.height,
-                                        "mse": mse,
-                                        "mae": mae,
-                                        "psnr": psnr,
-                                        "error": "",
-                                    }
                             writer.writerow(row)
                             csv_file.flush()
                             progress.update()

@@ -31,14 +31,16 @@ Launching `uv run gui` starts `MainWindow`:
      - **Mask preset** (for *Unsharp Mask*): `1 / 100 / 0`, `2 / 150 / 3`, `3 / 200 / 5`
        (radius / percent / threshold);
      - **Output format**: *Original*, *PNG*, or *JPEG*.
-   - After choosing an export folder, each selected image runs through `enhance_image(...)` and
-     `encode_image(...)` and is saved as `page-XXXX-image-YYYY.<ext>`.
+   - After choosing an export folder, selected images are enhanced as a batch via
+     `enhance_images(...)` (threaded on CPU or grouped by dimensions on `super-image`), converted
+     with `encode_image(...)`, and saved as `page-XXXX-image-YYYY.<ext>`.
 
 ## 2. Image Enhancement Algorithms
 
 ### Manual Lanczos-3 Resampling (`image_processing.lanczos_resize`)
 
-Resampling is implemented manually in NumPy as a separable 1D filter in `float64` precision:
+Resampling is implemented manually in NumPy as a separable 1D filter computing exact `float64`
+kernel weights and accumulating into reusable `float32` buffers:
 
 1. **Image mode normalization**:
    - `L`, `LA`, `RGB`, and `RGBA` modes are preserved natively.
@@ -93,10 +95,11 @@ Sharpening implements a standard Gaussian **Unsharp Mask** without external filt
 2. Resolves the execution device (`auto` -> `cuda` if available, else `cpu`) and loads the model
    through the `@lru_cache(maxsize=1)` helper `_load_super_image_model` (downloading pretrained
    weights from Hugging Face on first use).
-3. Converts inputs to `RGB`, verifies equal dimensions across the batch, concatenates tensors, and
-   runs forward inference inside `torch.inference_mode()`.
-4. When `ResizeMode.WIDTH` is active, resizes the upscaled output to the target width while
-   preserving aspect ratio using the manual `lanczos_resize` function.
+3. Converts inputs to `RGB`, groups images by `(width, height)` so heterogeneous selections can
+   still run in batched tensors while preserving original order, and runs forward inference inside
+   `torch.inference_mode()`.
+4. Rounds output pixels to `uint8` and, when `ResizeMode.WIDTH` is active, resizes to the target
+   width while preserving aspect ratio using the manual `lanczos_resize` function.
 
 ## 3. Export Format Encoding (`extractor.encode_image`)
 
@@ -104,7 +107,8 @@ Sharpening implements a standard Gaussian **Unsharp Mask** without external filt
   - When `EnhancementMethod.NONE` is active, writes the exact raw bytes and file extension
     extracted from the PDF.
   - When an enhancement method was applied, the enhanced pipeline outputs `PNG` bytes.
-- **`png`**: encodes losslessly via `fitz.Pixmap.tobytes("png")`.
+- **`png`**: converts non-grayscale/non-RGB colorspaces (such as CMYK) to RGB and encodes
+  losslessly via `fitz.Pixmap.tobytes("png")`.
 - **`jpg`**: strips any alpha channel, converts non-RGB colorspaces to 3-channel RGB, and encodes
   as JPEG.
 

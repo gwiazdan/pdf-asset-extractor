@@ -1,4 +1,10 @@
-"""Run PDF extraction in a separate process for the desktop application."""
+"""Run PDF extraction in a separate process for the desktop application.
+
+IPC contract:
+- Extracted image files and PNG thumbnails are written into ``output_dir``.
+- A JSON manifest referencing those filenames is printed to ``stdout``.
+- User-facing errors are written to ``stderr`` with exit code 1.
+"""
 
 import argparse
 import json

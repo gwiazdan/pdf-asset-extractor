@@ -30,14 +30,22 @@ class ExtractedImage:
     thumbnail_path: Path | None = None
 
 
+def _ensure_png_compatible(pixmap: fitz.Pixmap, *, drop_alpha: bool = False) -> fitz.Pixmap:
+    """Convert non-grayscale/non-RGB pixmaps (such as CMYK) to RGB for PNG encoding."""
+    if drop_alpha and pixmap.alpha:
+        return fitz.Pixmap(fitz.csRGB, pixmap)
+    if pixmap.colorspace is not None and pixmap.colorspace.n not in {1, 3}:
+        return fitz.Pixmap(fitz.csRGB, pixmap)
+    return pixmap
+
+
 def _thumbnail(image_data: bytes, max_size: int) -> bytes:
     """Create a PNG thumbnail from raw image bytes."""
-    image = fitz.Pixmap(image_data)
-    if image.alpha:
-        image = fitz.Pixmap(fitz.csRGB, image)
+    image = _ensure_png_compatible(fitz.Pixmap(image_data), drop_alpha=True)
 
     scale = min(max_size / image.width, max_size / image.height, 1)
     if scale < 1:
+        # Pixmap.shrink halves each dimension 2**k times, which is much faster than full resample.
         shrink_power = ceil(log2(1 / scale))
         image.shrink(shrink_power)
     return image.tobytes("png")
@@ -69,7 +77,13 @@ def extract_images_with_thumbnails(
 
     try:
         document = fitz.open(source_path)
-    except (OSError, ValueError, fitz.EmptyFileError, fitz.FileDataError) as error:
+    except (
+        OSError,
+        ValueError,
+        fitz.EmptyFileError,
+        fitz.FileDataError,
+        fitz.FileNotFoundError,
+    ) as error:
         raise PDFExtractionError(f"Nie można otworzyć pliku PDF: {source_path}") from error
 
     with document:
@@ -125,10 +139,13 @@ def encode_image(image: ExtractedImage, output_format: str) -> tuple[bytes, str]
     try:
         pixmap = fitz.Pixmap(image.data)
         if output_format == "jpg":
+            # JPEG does not support alpha or non-RGB colorspaces; drop alpha before RGB conversion.
             if pixmap.alpha:
                 pixmap = fitz.Pixmap(pixmap, 0)
             if pixmap.colorspace is None or pixmap.colorspace.n != 3:
                 pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+        else:
+            pixmap = _ensure_png_compatible(pixmap)
         return pixmap.tobytes(output_format), output_format
     except Exception as error:
         raise ImageConversionError(

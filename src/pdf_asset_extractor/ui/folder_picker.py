@@ -1,3 +1,5 @@
+"""Embedded folder picker widget with read-only PDF visibility."""
+
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -24,6 +26,8 @@ class FolderPickerWidget(QWidget):
         self.current_folder = Path.home()
         self.selected_folder: Path | None = None
         self.icon_provider = QFileIconProvider()
+        self.path_label = StrongBodyLabel()
+        self.folder_list = ListWidget()
         self._build_ui()
         self._refresh()
 
@@ -31,8 +35,6 @@ class FolderPickerWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        self.path_label = StrongBodyLabel()
-        self.folder_list = ListWidget()
         self.folder_list.setViewMode(ListWidget.ViewMode.ListMode)
         self.folder_list.itemClicked.connect(self._select_item)
         self.folder_list.itemDoubleClicked.connect(self._open_item)
@@ -55,6 +57,7 @@ class FolderPickerWidget(QWidget):
         layout.addLayout(buttons)
 
     def _refresh(self) -> None:
+        """Populate the list with subdirectories and non-interactive PDF previews."""
         self.path_label.setText(str(self.current_folder))
         self.folder_list.clear()
         self.selected_folder = None
@@ -63,12 +66,12 @@ class FolderPickerWidget(QWidget):
                 (
                     path
                     for path in self.current_folder.iterdir()
-                    if path.is_dir()
-                    or (path.is_file() and path.suffix.lower() == ".pdf")
+                    if path.is_dir() or (path.is_file() and path.suffix.lower() == ".pdf")
                 ),
                 key=lambda path: (not path.is_dir(), path.name.lower()),
             )
         except OSError:
+            # Unreadable system directories fall back to an empty view so users can navigate up.
             entries = []
 
         for entry in entries:
@@ -76,6 +79,7 @@ class FolderPickerWidget(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, str(entry))
             item.setToolTip(str(entry))
             if entry.is_file():
+                # Show PDF files as non-selectable visual hints of folder contents.
                 item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.folder_list.addItem(item)
 
