@@ -12,6 +12,21 @@ from pdf_asset_extractor.extractor import ExtractedImage
 PDF_EXTRACTION_TIMEOUT_SECONDS = 60
 
 
+def _worker_command(pdf_path: Path, output_dir: Path) -> tuple[str, list[str]]:
+    """Return the executable and arguments for the extraction subprocess."""
+    if getattr(sys, "frozen", False):
+        return sys.executable, ["--extraction-worker", str(pdf_path), str(output_dir)]
+    return (
+        sys.executable,
+        [
+            "-m",
+            "pdf_asset_extractor.extraction_worker",
+            str(pdf_path),
+            str(output_dir),
+        ],
+    )
+
+
 class PDFExtractionJob(QObject):
     """Extract PDF images in a subprocess with a hard timeout."""
 
@@ -45,15 +60,8 @@ class PDFExtractionJob(QObject):
 
     def start(self) -> None:
         """Start the extraction worker and its timeout."""
-        self._process.start(
-            sys.executable,
-            [
-                "-m",
-                "pdf_asset_extractor.extraction_worker",
-                str(self.pdf_path),
-                str(self._output_dir),
-            ],
-        )
+        program, arguments = _worker_command(self.pdf_path, self._output_dir)
+        self._process.start(program, arguments)
         self._timeout_timer.start(self.timeout_seconds * 1000)
 
     def cancel(self) -> None:

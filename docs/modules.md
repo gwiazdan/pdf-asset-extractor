@@ -44,8 +44,9 @@ Handles embedded PDF image extraction, thumbnail generation, and export format e
     colorspaces (such as CMYK) to RGB before PNG encoding.
   - `_thumbnail(image_data, max_size)` — builds a PNG thumbnail using power-of-two downsampling
     (`fitz.Pixmap.shrink`).
-  - `_output_paths(output_dir, page_number, image_index, extension)` — produces deterministic
-    names in the form `page-XXXX-image-YYYY.<ext>`.
+  - `_output_paths(output_dir, page_number, image_index, extension)` — produces distinct
+    deterministic names `page-XXXX-image-YYYY.<ext>` (full image) and
+    `page-XXXX-image-YYYY-thumb.png` (thumbnail).
 
 ### `extraction_worker.py`
 

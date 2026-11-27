@@ -54,9 +54,9 @@ def _thumbnail(image_data: bytes, max_size: int) -> bytes:
 def _output_paths(
     output_dir: Path, page_number: int, image_index: int, extension: str
 ) -> tuple[Path, Path]:
-    """Return stable paths for one extracted image and its thumbnail."""
+    """Return distinct stable paths for one extracted image and its thumbnail."""
     stem = f"page-{page_number:04d}-image-{image_index:04d}"
-    return output_dir / f"{stem}.{extension}", output_dir / f"{stem}.png"
+    return output_dir / f"{stem}.{extension}", output_dir / f"{stem}-thumb.png"
 
 
 def extract_images_with_thumbnails(

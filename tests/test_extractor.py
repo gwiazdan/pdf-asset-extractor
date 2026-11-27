@@ -74,6 +74,11 @@ def test_extract_images_across_pages_and_write_outputs(tmp_path: Path) -> None:
         assert image.path.is_file()
         assert image.thumbnail_path is not None
         assert image.thumbnail_path.is_file()
+        assert image.path != image.thumbnail_path
+        with Image.open(image.path) as saved_image:
+            assert saved_image.size == (image.width, image.height)
+        with Image.open(image.thumbnail_path) as saved_thumb:
+            assert max(saved_thumb.size) <= 64
         with Image.open(BytesIO(image.thumbnail)) as thumb:
             assert max(thumb.size) <= 64
 

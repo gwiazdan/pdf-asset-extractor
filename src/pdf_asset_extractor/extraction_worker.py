@@ -7,6 +7,7 @@ IPC contract:
 """
 
 import argparse
+from collections.abc import Sequence
 import json
 from pathlib import Path
 import sys
@@ -14,12 +15,12 @@ import sys
 from pdf_asset_extractor.extractor import PDFExtractionError, extract_images_with_thumbnails
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Extract a PDF and print a JSON manifest for the parent process."""
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf_path", type=Path)
     parser.add_argument("output_dir", type=Path)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
 
     try:
         images = extract_images_with_thumbnails(

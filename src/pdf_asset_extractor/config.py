@@ -21,7 +21,17 @@ ACCENT_COLOR: Final[QColor] = (
 )
 # Acrylic window backdrop is a Windows DWM feature.
 ACRYLIC_ENABLED: Final[bool] = sys.platform == "win32"
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_base_dir() -> Path:
+    """Return the bundle root when frozen by PyInstaller or the repository root."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass is not None:
+        return Path(meipass)
+    return Path(__file__).resolve().parent.parent.parent
+
+
+BASE_DIR = _resolve_base_dir()
 LOGO_PATH = BASE_DIR / "assets" / "logo.svg"
 PDF_ICON_PATH = BASE_DIR / "assets" / "pdf.svg"
 PDF_TILE_SIZE = QSize(180, 180)

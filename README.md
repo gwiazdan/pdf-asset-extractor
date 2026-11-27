@@ -38,3 +38,33 @@ Useful options include `--benchmark-limit 10` for a small trial run,
 (`--benchmark-models none` runs Lanczos only). Use
 `--benchmark-device cpu` to force CPU inference. PyTorch CPU inference uses one
 thread.
+
+## Building standalone binaries
+
+Standalone `--onedir` bundles (PyInstaller with CPU-only PyTorch so `super-image`
+works out of the box) are built automatically by `.github/workflows/build.yml`
+for **Windows (x64)** and **Linux (x64)**:
+
+- Push to `main`, pull requests, and manual `workflow_dispatch` runs upload
+  verified `.zip` / `.tar.gz` artifacts.
+- Pushing a version tag (`v*`, e.g. `git tag v0.1.0 && git push origin v0.1.0`)
+  publishes a GitHub Release with both archives and `SHA256SUMS.txt`.
+
+To build locally on Windows:
+
+```shell
+uv sync --no-dev --group build
+uv run python scripts/build.py
+```
+
+To build a CPU-only bundle locally on Linux (without bundling CUDA libraries):
+
+```shell
+uv venv .venv-build --python 3.12
+uv pip install --no-config --python .venv-build \
+  --index https://download.pytorch.org/whl/cpu \
+  --default-index https://pypi.org/simple \
+  torch torchvision
+uv pip install --no-config --python .venv-build --no-upgrade . "pyinstaller>=6.12.0"
+.venv-build/bin/python scripts/build.py --require-cpu-torch
+```
