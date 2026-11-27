@@ -15,13 +15,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "numpy>=2.0",
-  "opencv-python<5",
+  "onnxruntime>=1.20.0",
   "pillow>=12.0",
   "pymupdf>=2.1",
   "pyside6>=6.10.0",
   "pyside6-fluent-widgets[full]>=1.11.3",
   "pytest>=9.2.0",
-  "super-image>=0.2.0",
   "tqdm>=4.70.1",
 ]
 
@@ -38,6 +37,11 @@ build = [
 ]
 dev = [
     "pre-commit>=4.7.0",
+]
+export_models = [
+  "onnx>=1.17.0",
+  "opencv-python<5",
+  "super-image>=0.2.0",
 ]
 type_check = [
   "basedpyright>=1.40.0",

@@ -1,0 +1,54 @@
+name: Export ONNX Models
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release tag where exported .onnx files are published"
+        required: false
+        default: "models-v1"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  export-models:
+    name: Export & Publish ONNX Super-Resolution Models
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install CPU PyTorch and ONNX export dependencies
+        shell: bash
+        run: |
+          uv venv .venv-export --python 3.12
+          uv pip install --no-config --python .venv-export \
+            --index https://download.pytorch.org/whl/cpu \
+            --default-index https://pypi.org/simple \
+            torch torchvision
+          uv pip install --no-config --python .venv-export --no-upgrade \
+            . "super-image>=0.2.0" "opencv-python<5" "onnx>=1.17.0"
+
+      - name: Export and verify all 6 ONNX models
+        shell: bash
+        run: .venv-export/bin/python scripts/export_onnx_models.py --output-dir dist/models
+
+      - name: Publish models release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || 'models-v1' }}
+          name: "ONNX Super-Resolution Models (${{ inputs.release_tag || 'models-v1' }})"
+          body: >-
+            Pre-exported dynamic-shape ONNX weights (`drln-bam`, `edsr`, `msrn` at `2x` and `4x`)
+            used by PDF Asset Extractor with ONNX Runtime (DirectML GPU on Windows, CPU/CUDA on
+            Linux).
+          files: dist/models/*

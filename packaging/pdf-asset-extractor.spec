@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller specification for PDF Asset Extractor (--onedir)."""
+"""PyInstaller specification for PDF Asset Extractor (--onedir, ONNX Runtime)."""
 
 from importlib.util import find_spec
 from pathlib import Path
@@ -11,18 +11,26 @@ ROOT_DIR = Path(SPECPATH).resolve().parent
 ENTRYPOINT = ROOT_DIR / "src" / "pdf_asset_extractor" / "__main__.py"
 ICON_PATH = ROOT_DIR / "build" / "app.ico"
 
-binaries = [
-    *collect_dynamic_libs("torchvision"),
-]
 
-# Torchvision loads native C++ operator extensions (e.g. _C_stable.so / .pyd) dynamically
-# via torch.ops.load_library() rather than Python import, so collect them explicitly.
-_tv_spec = find_spec("torchvision")
-if _tv_spec is not None and _tv_spec.submodule_search_locations:
-    _tv_dir = Path(next(iter(_tv_spec.submodule_search_locations)))
-    for _pattern in ("*.so", "*.so.*", "*.pyd", "*.dll"):
-        for _lib in sorted(_tv_dir.glob(_pattern)):
-            binaries.append((str(_lib), "torchvision"))
+def _collect_onnxruntime_binaries() -> list[tuple[str, str]]:
+    """Collect ONNX Runtime native libraries including DirectML.dll on Windows."""
+    collected = list(collect_dynamic_libs("onnxruntime"))
+    seen = {(src, dst) for src, dst in collected}
+    spec = find_spec("onnxruntime")
+    if spec is not None and spec.submodule_search_locations:
+        ort_dir = Path(next(iter(spec.submodule_search_locations)))
+        capi_dir = ort_dir / "capi"
+        if capi_dir.is_dir():
+            for pattern in ("*.so", "*.so.*", "*.pyd", "*.dll"):
+                for lib in sorted(capi_dir.glob(pattern)):
+                    entry = (str(lib), "onnxruntime/capi")
+                    if entry not in seen:
+                        collected.append(entry)
+                        seen.add(entry)
+    return collected
+
+
+binaries = _collect_onnxruntime_binaries()
 
 datas = [
     (str(ROOT_DIR / "assets" / "logo.svg"), "assets"),
@@ -30,14 +38,9 @@ datas = [
 ]
 
 for distribution in (
-    "filelock",
-    "huggingface-hub",
+    "onnxruntime",
+    "onnxruntime-directml",
     "packaging",
-    "requests",
-    "super-image",
-    "torch",
-    "torchvision",
-    "tqdm",
 ):
     try:
         datas += copy_metadata(distribution)
@@ -45,12 +48,13 @@ for distribution in (
         pass
 
 hiddenimports = [
+    "onnxruntime.capi._pybind_state",
     "pdf_asset_extractor.extraction_worker",
     "pdf_asset_extractor.ui.main_window",
     "PySide6.QtSvg",
     "PySide6.QtSvgWidgets",
     "PySide6.QtXml",
-    *collect_submodules("super_image"),
+    *collect_submodules("onnxruntime"),
 ]
 
 excludes = [
@@ -92,8 +96,16 @@ excludes = [
     "PySide6.QtWebEngineQuick",
     "PySide6.QtWebEngineWidgets",
     "PySide6.QtWebSockets",
+    # Heavy ML export-only dependencies (not needed at runtime with ONNX Runtime).
+    "cv2",
+    "h5py",
+    "hf_xet",
+    "huggingface_hub",
+    "onnx",
+    "super_image",
+    "torch",
+    "torchvision",
     # Unused PyMuPDF layout/LLM extras.
-    "onnxruntime",
     "pymupdf4llm",
     "pymupdf_layout",
     # Development, linting, and testing tools.
@@ -105,6 +117,7 @@ excludes = [
     "ruff",
     "rumdl",
     "tkinter",
+    "tqdm",
 ]
 
 a = Analysis(

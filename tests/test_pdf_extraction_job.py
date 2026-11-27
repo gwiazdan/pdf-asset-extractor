@@ -10,8 +10,12 @@ from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 import pytest
 
+from pdf_asset_extractor.__main__ import _ensure_stdio_streams
 from pdf_asset_extractor.__main__ import main as app_main
 from pdf_asset_extractor.config import _resolve_base_dir
+from pdf_asset_extractor.extractor import ExtractedImage
+from pdf_asset_extractor.image_enhancer import EnhancementMethod, EnhancementOptions
+from pdf_asset_extractor.ui.export_job import ExportJob
 from pdf_asset_extractor.ui.pdf_extraction import PDFExtractionJob, _worker_command
 
 
@@ -152,3 +156,82 @@ def test_resolve_base_dir_uses_meipass_when_present(
 
     monkeypatch.delattr(sys, "_MEIPASS", raising=False)
     assert (_resolve_base_dir() / "assets" / "logo.svg").is_file()
+
+
+def test_ensure_stdio_streams_replaces_only_none_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    _ensure_stdio_streams()
+    new_stdout = sys.stdout
+    new_stderr = sys.stderr
+    try:
+        assert new_stdout is not None
+        assert new_stderr is not None
+        new_stdout.write("ok")
+        new_stderr.write("ok")
+        _ensure_stdio_streams()
+        assert sys.stdout is new_stdout
+        assert sys.stderr is new_stderr
+    finally:
+        if new_stdout is not None:
+            new_stdout.close()
+        if new_stderr is not None:
+            new_stderr.close()
+
+
+def test_export_job_saves_images_asynchronously_with_progress(tmp_path: Path) -> None:
+    image_buffer = BytesIO()
+    Image.new("RGB", (32, 24), color=(50, 120, 200)).save(image_buffer, format="PNG")
+    raw_bytes = image_buffer.getvalue()
+    extracted = ExtractedImage(
+        page_number=1,
+        image_index=1,
+        width=32,
+        height=24,
+        extension="png",
+        data=raw_bytes,
+        thumbnail=raw_bytes,
+    )
+
+    event_loop = QEventLoop()
+    outcome: dict[str, object] = {}
+    statuses: list[str] = []
+    job = ExportJob(
+        [extracted],
+        tmp_path,
+        "png",
+        EnhancementOptions(method=EnhancementMethod.LANCZOS, scale=2.0),
+    )
+
+    def _on_completed(count: int, folder: str) -> None:
+        outcome["completed"] = (count, folder)
+        event_loop.quit()
+
+    def _on_failed(message: str) -> None:
+        outcome["failed"] = message
+        event_loop.quit()
+
+    job.status_changed.connect(statuses.append)
+    job.completed.connect(_on_completed)
+    job.failed.connect(_on_failed)
+
+    safety_timer = QTimer()
+    safety_timer.setSingleShot(True)
+    safety_timer.timeout.connect(event_loop.quit)
+    job.start()
+    safety_timer.start(10_000)
+    event_loop.exec()
+    safety_timer.stop()
+    job.wait(5000)
+    job.deleteLater()
+
+    assert "failed" not in outcome
+    assert outcome["completed"] == (1, str(tmp_path))
+    assert statuses
+    saved_file = tmp_path / "page-0001-image-0001.png"
+    assert saved_file.is_file()
+    with Image.open(saved_file) as exported:
+        assert exported.size == (64, 48)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 import hashlib
-from importlib import metadata
 import json
 import os
 from pathlib import Path
@@ -52,29 +51,17 @@ def _platform_tag() -> str:
     return f"{sys.platform}-{arch}"
 
 
-def _verify_cpu_torch_environment() -> None:
-    """Ensure the Linux build environment uses CPU-only PyTorch without CUDA packages."""
-    if not sys.platform.startswith("linux"):
+def _verify_directml_environment() -> None:
+    """Ensure the Windows build environment provides ONNX Runtime DirectML."""
+    if sys.platform != "win32":
         return
 
-    import torch
+    import onnxruntime as ort
 
-    if "+cpu" not in torch.__version__:
+    providers = ort.get_available_providers()
+    if "DmlExecutionProvider" not in providers:
         raise RuntimeError(
-            f"Expected CPU-only PyTorch on Linux build, found torch=={torch.__version__}."
-        )
-
-    forbidden_prefixes = ("nvidia-", "cuda-", "triton")
-    forbidden_dists = sorted(
-        dist.metadata["Name"]
-        for dist in metadata.distributions()
-        if (name := dist.metadata.get("Name")) is not None
-        and name.lower().startswith(forbidden_prefixes)
-    )
-    if forbidden_dists:
-        raise RuntimeError(
-            "Found CUDA/Triton packages in Linux CPU build environment: "
-            + ", ".join(forbidden_dists)
+            f"Expected onnxruntime-directml with DmlExecutionProvider, found: {providers}"
         )
 
 
@@ -112,12 +99,15 @@ def _run_pyinstaller() -> None:
     subprocess.run(command, cwd=ROOT_DIR, check=True)
 
 
-def _run_smoke_test(binary: Path) -> None:
+def _run_smoke_test(binary: Path, *, require_directml: bool) -> None:
     if not binary.is_file():
         raise FileNotFoundError(f"Built binary not found: {binary}")
 
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
+    if require_directml and sys.platform == "win32":
+        env["PDF_ASSET_EXTRACTOR_REQUIRE_DIRECTML"] = "1"
+
     completed = subprocess.run(
         [str(binary), "--self-check"],
         capture_output=True,
@@ -142,6 +132,12 @@ def _run_smoke_test(binary: Path) -> None:
         or payload.get("extracted_images") != 1
     ):
         raise RuntimeError(f"Unexpected smoke test payload: {payload!r}")
+    if (
+        require_directml
+        and sys.platform == "win32"
+        and "DmlExecutionProvider" not in payload.get("providers", [])
+    ):
+        raise RuntimeError(f"DirectML provider missing in frozen binary: {payload!r}")
     print(f"Smoke test passed: {payload}")
 
 
@@ -184,9 +180,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Directory where packaged release archives are written.",
     )
     parser.add_argument(
-        "--require-cpu-torch",
+        "--require-directml",
         action="store_true",
-        help="Fail on Linux if CUDA/Triton packages or non-CPU PyTorch are installed.",
+        help="Fail on Windows if ONNX Runtime DirectML provider is not installed.",
     )
     parser.add_argument(
         "--skip-smoke-test",
@@ -199,8 +195,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     platform_tag = _platform_tag()
     print(f"Building {APP_NAME} v{version} for {platform_tag}...")
 
-    if arguments.require_cpu_torch:
-        _verify_cpu_torch_environment()
+    if arguments.require_directml:
+        _verify_directml_environment()
 
     if sys.platform == "win32":
         _generate_windows_icon(ROOT_DIR / "assets" / "logo.svg", WINDOWS_ICON_PATH)
@@ -209,7 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     binary = _binary_path(DIST_APP_DIR)
     if not arguments.skip_smoke_test:
-        _run_smoke_test(binary)
+        _run_smoke_test(binary, require_directml=arguments.require_directml)
 
     archive_path = _package_archive(DIST_APP_DIR, arguments.output_dir, version, platform_tag)
     checksum_path, checksum = _write_sha256(archive_path, platform_tag)

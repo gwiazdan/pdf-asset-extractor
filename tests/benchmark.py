@@ -298,11 +298,6 @@ def test_restoration_benchmark(request) -> None:
     models = _parse_models(request.config.getoption("--benchmark-models"))
     device = request.config.getoption("--benchmark-device")
 
-    if models:
-        import torch
-
-        torch.set_num_threads(1)
-
     output_path: Path = request.config.getoption("--benchmark-csv")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     configurations = [

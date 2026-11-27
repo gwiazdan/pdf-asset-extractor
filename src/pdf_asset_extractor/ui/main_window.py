@@ -1,12 +1,11 @@
 """Main desktop window for browsing PDFs and exporting embedded images."""
 
-import os
 from pathlib import Path
 import sys
 from typing import Final
 
 from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QCloseEvent, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,9 +21,11 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     FluentIcon,
+    IndeterminateProgressBar,
     ListWidget,
     MessageBox,
     MSFluentWindow,
+    ProgressBar,
     PushButton,
     StrongBodyLabel,
 )
@@ -35,15 +36,15 @@ from pdf_asset_extractor.config import (
     PDF_TILE_SIZE,
     apply_default_config,
 )
-from pdf_asset_extractor.extractor import ExtractedImage, ImageConversionError, encode_image
+from pdf_asset_extractor.extractor import ExtractedImage
 from pdf_asset_extractor.image_enhancer import (
     SUPER_IMAGE_MODELS,
-    EnhancementError,
     EnhancementMethod,
     EnhancementOptions,
     ResizeMode,
-    enhance_images,
 )
+from pdf_asset_extractor.onnx_upscaler import detect_default_accelerator
+from pdf_asset_extractor.ui.export_job import ExportJob
 from pdf_asset_extractor.ui.file_utils import icon_for_path
 from pdf_asset_extractor.ui.folder_picker import FolderPickerWidget
 from pdf_asset_extractor.ui.pdf_extraction import PDFExtractionJob
@@ -62,8 +63,8 @@ OUTPUT_FORMAT_MAP: Final[dict[str, str]] = {
 }
 DEVICE_MAP: Final[dict[str, str]] = {
     "Auto": "auto",
+    "GPU": "gpu",
     "CPU": "cpu",
-    "CUDA": "cuda",
 }
 
 
@@ -140,6 +141,7 @@ class MainWindow(MSFluentWindow):
         self.selected_pdf: Path | None = None
         self.extracted_images: list[ExtractedImage] = []
         self._extraction_job: PDFExtractionJob | None = None
+        self._export_job: ExportJob | None = None
 
         # Instantiate view widgets upfront so every attribute is initialized cleanly.
         self.folder_label = StrongBodyLabel()
@@ -152,9 +154,17 @@ class MainWindow(MSFluentWindow):
         self.enhancement_width_combo: ComboBox = ComboBox()
         self.enhancement_model_combo: ComboBox = ComboBox()
         self.enhancement_device_combo: ComboBox = ComboBox()
+        self.enhancement_accelerator_label = CaptionLabel(
+            f"Wykryte urządzenie AI: {detect_default_accelerator()}"
+        )
         self.enhancement_unsharp_combo: ComboBox = ComboBox()
         self.output_format_combo = ComboBox()
         self.export_button = PushButton("Eksportuj zaznaczone obrazy")
+        self.cancel_export_button = PushButton("Anuluj")
+        self.export_status_label = CaptionLabel("")
+        self.export_progress_bar = ProgressBar()
+        self.export_indeterminate_bar = IndeterminateProgressBar()
+        self.export_progress_panel = QWidget()
 
         self._folder_picker = FolderPickerWidget()
         self._folder_picker.setObjectName("folderInterface")
@@ -250,7 +260,10 @@ class MainWindow(MSFluentWindow):
 
         model_row = QHBoxLayout()
         model_row.addWidget(CaptionLabel("Model"))
-        self.enhancement_model_combo.addItems([name for name, _ in SUPER_IMAGE_MODELS])
+        model_names = [name for name, _ in SUPER_IMAGE_MODELS]
+        self.enhancement_model_combo.addItems(model_names)
+        if "msrn" in model_names:
+            self.enhancement_model_combo.setCurrentIndex(model_names.index("msrn"))
         model_row.addWidget(self.enhancement_model_combo)
         model_row.addWidget(CaptionLabel("Urządzenie"))
         self.enhancement_device_combo.addItems(list(DEVICE_MAP))
@@ -260,6 +273,7 @@ class MainWindow(MSFluentWindow):
         model_row.addWidget(self.enhancement_unsharp_combo)
         model_row.addStretch()
         enhancement_options.addLayout(model_row)
+        enhancement_options.addWidget(self.enhancement_accelerator_label)
         enhancement_options.addWidget(
             CaptionLabel(
                 "Opcja zostanie zastosowana wsadowo tuż przed zapisem plików. "
@@ -274,6 +288,21 @@ class MainWindow(MSFluentWindow):
         export_options.addWidget(self.output_format_combo)
         export_options.addStretch()
         layout.addLayout(export_options)
+
+        progress_layout = QVBoxLayout(self.export_progress_panel)
+        progress_layout.setContentsMargins(0, 4, 0, 4)
+        progress_header = QHBoxLayout()
+        progress_header.addWidget(self.export_status_label, 1)
+        self.cancel_export_button.clicked.connect(self._cancel_export)
+        progress_header.addWidget(self.cancel_export_button)
+        progress_layout.addLayout(progress_header)
+        self.export_progress_bar.setRange(0, 100)
+        self.export_progress_bar.setValue(0)
+        progress_layout.addWidget(self.export_progress_bar)
+        progress_layout.addWidget(self.export_indeterminate_bar)
+        self.export_indeterminate_bar.hide()
+        self.export_progress_panel.hide()
+        layout.addWidget(self.export_progress_panel)
 
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_selected_images)
@@ -395,8 +424,51 @@ class MainWindow(MSFluentWindow):
         job.deleteLater()
         MessageBox("Nie można odczytać pliku PDF", message, self).exec()
 
+    def _set_export_in_progress(self, in_progress: bool) -> None:
+        """Toggle progress panel visibility and interactive controls during export."""
+        self.export_progress_panel.setVisible(in_progress)
+        self.export_button.setEnabled(not in_progress and bool(self.extracted_images))
+        self.cancel_export_button.setEnabled(in_progress)
+        self.enhancement_combo.setEnabled(not in_progress)
+        self.output_format_combo.setEnabled(not in_progress)
+        self.image_list.setEnabled(not in_progress)
+        if in_progress:
+            self.enhancement_resize_mode_combo.setEnabled(False)
+            self.enhancement_scale_combo.setEnabled(False)
+            self.enhancement_width_combo.setEnabled(False)
+            self.enhancement_model_combo.setEnabled(False)
+            self.enhancement_device_combo.setEnabled(False)
+            self.enhancement_unsharp_combo.setEnabled(False)
+        else:
+            self.export_indeterminate_bar.stop()
+            self.export_indeterminate_bar.hide()
+            self.export_progress_bar.show()
+            self.export_progress_bar.setValue(0)
+            self.export_status_label.setText("")
+            self._update_enhancement_controls()
+
+    def _update_export_progress(self, current: int, maximum: int) -> None:
+        if maximum <= 0:
+            self.export_progress_bar.hide()
+            self.export_indeterminate_bar.show()
+            self.export_indeterminate_bar.start()
+            return
+        self.export_indeterminate_bar.stop()
+        self.export_indeterminate_bar.hide()
+        self.export_progress_bar.show()
+        self.export_progress_bar.setRange(0, maximum)
+        self.export_progress_bar.setValue(min(current, maximum))
+
+    def _cancel_export(self) -> None:
+        if self._export_job is not None:
+            self.cancel_export_button.setEnabled(False)
+            self._export_job.cancel()
+
     def _export_selected_images(self) -> None:
-        """Save the selected images using the chosen enhancement and output format."""
+        """Save the selected images asynchronously with live progress feedback."""
+        if self._export_job is not None:
+            return
+
         selected_items = self.image_list.selectedItems()
         if not selected_items:
             MessageBox("Brak zaznaczenia", "Zaznacz co najmniej jeden obraz.", self).exec()
@@ -413,41 +485,76 @@ class MainWindow(MSFluentWindow):
             self.extracted_images[item.data(Qt.ItemDataRole.UserRole)] for item in selected_items
         ]
 
-        try:
-            workers = min(len(selected_images), os.cpu_count() or 1)
-            enhanced_batch = enhance_images(
-                [image.data for image in selected_images],
-                enhancement_options,
-                workers=workers,
-            )
-            for image, enhanced_data in zip(selected_images, enhanced_batch, strict=True):
-                if enhancement_options.method is EnhancementMethod.NONE:
-                    image_data, extension = encode_image(image, output_format)
-                else:
-                    enhanced_image = ExtractedImage(
-                        page_number=image.page_number,
-                        image_index=image.image_index,
-                        width=image.width,
-                        height=image.height,
-                        extension="png",
-                        data=enhanced_data,
-                        thumbnail=image.thumbnail,
-                    )
-                    image_data, extension = encode_image(enhanced_image, output_format)
+        job = ExportJob(
+            selected_images,
+            destination,
+            output_format,
+            enhancement_options,
+            parent=self,
+        )
+        self._export_job = job
+        self._set_export_in_progress(True)
+        self.export_status_label.setText("Przygotowywanie eksportu...")
+        self._update_export_progress(0, 0)
 
-                filename = (
-                    f"page-{image.page_number:04d}-image-{image.image_index:04d}.{extension}"
-                )
-                (destination / filename).write_bytes(image_data)
-        except (EnhancementError, ImageConversionError, OSError) as error:
-            MessageBox("Eksport nie powiódł się", str(error), self).exec()
+        job.status_changed.connect(lambda text: self._on_export_status(job, text))
+        job.progress_changed.connect(
+            lambda current, maximum: self._on_export_progress(job, current, maximum)
+        )
+        job.completed.connect(lambda count, folder: self._on_export_completed(job, count, folder))
+        job.cancelled.connect(lambda count, folder: self._on_export_cancelled(job, count, folder))
+        job.failed.connect(lambda message: self._on_export_failed(job, message))
+        job.start()
+
+    def _on_export_status(self, job: ExportJob, text: str) -> None:
+        if self._export_job is job:
+            self.export_status_label.setText(text)
+
+    def _on_export_progress(self, job: ExportJob, current: int, maximum: int) -> None:
+        if self._export_job is job:
+            self._update_export_progress(current, maximum)
+
+    def _finish_export_job(self, job: ExportJob) -> bool:
+        if self._export_job is not job:
+            return False
+        self._export_job = None
+        job.wait()
+        job.deleteLater()
+        self._set_export_in_progress(False)
+        return True
+
+    def _on_export_completed(self, job: ExportJob, saved_count: int, output_path: str) -> None:
+        if not self._finish_export_job(job):
             return
-
         MessageBox(
             "Eksport zakończony",
-            f"Zapisano {len(selected_images)} obrazów w folderze {output_path}.",
+            f"Zapisano {saved_count} obrazów w folderze {output_path}.",
             self,
         ).exec()
+
+    def _on_export_cancelled(self, job: ExportJob, saved_count: int, output_path: str) -> None:
+        if not self._finish_export_job(job):
+            return
+        details = (
+            f"Eksport został anulowany. Zapisano {saved_count} obrazów w folderze {output_path}."
+            if saved_count > 0
+            else "Eksport został anulowany."
+        )
+        MessageBox("Eksport anulowany", details, self).exec()
+
+    def _on_export_failed(self, job: ExportJob, message: str) -> None:
+        if not self._finish_export_job(job):
+            return
+        MessageBox("Eksport nie powiódł się", message, self).exec()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        """Cancel any active background jobs before closing the window."""
+        if self._extraction_job is not None:
+            self._extraction_job.cancel()
+        if self._export_job is not None:
+            self._export_job.cancel()
+            self._export_job.wait(3000)
+        super().closeEvent(event)
 
     def _show_folder_content(self, folder_path: Path) -> None:
         try:

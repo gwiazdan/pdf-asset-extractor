@@ -1,14 +1,17 @@
-"""Unit and integration tests for image enhancement orchestration."""
+"""Unit and integration tests for image enhancement orchestration and ONNX upscaling."""
 
 from io import BytesIO
+from pathlib import Path
+from typing import Any, cast
+import urllib.request
 
 import numpy as np
 from PIL import Image
 import pytest
-import torch
 
 import pdf_asset_extractor.image_enhancer as image_enhancer
 from pdf_asset_extractor.image_enhancer import (
+    EnhancementCancelledError,
     EnhancementError,
     EnhancementMethod,
     EnhancementOptions,
@@ -17,11 +20,25 @@ from pdf_asset_extractor.image_enhancer import (
     enhance_image,
     enhance_images,
 )
+from pdf_asset_extractor.onnx_upscaler import (
+    OnnxUpscalerSession,
+    ensure_model_file,
+    upscale_rgb_array,
+)
 
 
 class NearestUpscaler:
-    def __call__(self, images: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.interpolate(images, scale_factor=2, mode="nearest")
+    """Deterministic 2x nearest-neighbor NCHW upscaler standing in for an ONNX session."""
+
+    scale = 2
+    accelerator_label = "CPU"
+
+    def __call__(self, images: np.ndarray) -> np.ndarray:
+        return np.repeat(np.repeat(images, 2, axis=2), 2, axis=3).astype(np.float32)
+
+
+def _fake_session(*_args: object, **_kwargs: object) -> OnnxUpscalerSession:
+    return cast(Any, NearestUpscaler())
 
 
 def _encode_image(color: tuple[int, int, int], size: tuple[int, int] = (8, 8)) -> bytes:
@@ -31,12 +48,27 @@ def _encode_image(color: tuple[int, int, int], size: tuple[int, int] = (8, 8)) -
 
 
 def test_resolve_device_variants() -> None:
-    assert _resolve_device("auto", cuda_available=False) == "cpu"
-    assert _resolve_device("auto", cuda_available=True) == "cuda"
-    assert _resolve_device("cpu", cuda_available=True) == "cpu"
+    assert _resolve_device("auto", available_providers=["CPUExecutionProvider"]) == (
+        ["CPUExecutionProvider"],
+        "CPU",
+    )
+    assert _resolve_device(
+        "auto", available_providers=["DmlExecutionProvider", "CPUExecutionProvider"]
+    ) == (["DmlExecutionProvider", "CPUExecutionProvider"], "DirectML (GPU)")
+    assert _resolve_device(
+        "auto", available_providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+    ) == (["CUDAExecutionProvider", "CPUExecutionProvider"], "CUDA (GPU)")
+    assert _resolve_device(
+        "gpu", available_providers=["DmlExecutionProvider", "CPUExecutionProvider"]
+    ) == (["DmlExecutionProvider", "CPUExecutionProvider"], "DirectML (GPU)")
+    assert _resolve_device(
+        "cpu", available_providers=["DmlExecutionProvider", "CPUExecutionProvider"]
+    ) == (["CPUExecutionProvider"], "CPU")
 
+    with pytest.raises(EnhancementError, match="DirectML"):
+        _resolve_device("gpu", available_providers=["CPUExecutionProvider"])
     with pytest.raises(EnhancementError, match="CUDA"):
-        _resolve_device("cuda", cuda_available=False)
+        _resolve_device("cuda", available_providers=["CPUExecutionProvider"])
 
 
 def test_none_method_returns_original_bytes() -> None:
@@ -76,21 +108,13 @@ def test_invalid_enhancement_options_raise_enhancement_error(options: Enhancemen
         enhance_image(_encode_image((100, 100, 100)), options)
 
 
-@pytest.mark.parametrize(
-    "device",
-    ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",),
-)
-def test_super_image_batch_matches_single_image_outputs(monkeypatch, device: str) -> None:
-    monkeypatch.setattr(
-        image_enhancer,
-        "_load_super_image_model",
-        lambda model_name, scale, device: NearestUpscaler(),
-    )
+def test_super_image_batch_matches_single_image_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_enhancer, "_load_super_image_model", _fake_session)
     options = EnhancementOptions(
         method=EnhancementMethod.SUPER_IMAGE,
-        scale=2,
+        scale=2.0,
         model_name="edsr",
-        device=device,
+        device="cpu",
     )
     image_data = [_encode_image((255, 0, 0)), _encode_image((0, 255, 0))]
 
@@ -105,12 +129,10 @@ def test_super_image_batch_matches_single_image_outputs(monkeypatch, device: str
         np.testing.assert_array_equal(batch_pixels, single_pixels)
 
 
-def test_super_image_batch_handles_mixed_dimensions_preserving_order(monkeypatch) -> None:
-    monkeypatch.setattr(
-        image_enhancer,
-        "_load_super_image_model",
-        lambda model_name, scale, device: NearestUpscaler(),
-    )
+def test_super_image_batch_handles_mixed_dimensions_preserving_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_enhancer, "_load_super_image_model", _fake_session)
     options = EnhancementOptions(
         method=EnhancementMethod.SUPER_IMAGE,
         scale=2.0,
@@ -135,8 +157,8 @@ def test_super_image_batch_handles_mixed_dimensions_preserving_order(monkeypatch
             assert np.all(np.asarray(enhanced) == np.array(expected_color, dtype=np.uint8))
 
 
-def test_lanczos_enhancement_resizes_without_pil_resize(monkeypatch) -> None:
-    def _forbid_pil_resize(*args, **kwargs):
+def test_lanczos_enhancement_resizes_without_pil_resize(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _forbid_pil_resize(*args: object, **kwargs: object) -> None:
         raise AssertionError("PIL Image.resize should not be called")
 
     monkeypatch.setattr(Image.Image, "resize", _forbid_pil_resize)
@@ -154,8 +176,10 @@ def test_lanczos_enhancement_resizes_without_pil_resize(monkeypatch) -> None:
         assert np.all(np.asarray(enhanced) == np.array([120, 60, 200], dtype=np.uint8))
 
 
-def test_unsharp_mask_enhancement_sharpens_without_pil_filter(monkeypatch) -> None:
-    def _forbid_pil_filter(*args, **kwargs):
+def test_unsharp_mask_enhancement_sharpens_without_pil_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _forbid_pil_filter(*args: object, **kwargs: object) -> None:
         raise AssertionError("PIL Image.filter should not be called")
 
     monkeypatch.setattr(Image.Image, "filter", _forbid_pil_filter)
@@ -179,16 +203,12 @@ def test_unsharp_mask_enhancement_sharpens_without_pil_filter(monkeypatch) -> No
         assert int(result[12, 12, 0]) > 200
 
 
-def test_super_image_width_mode_uses_manual_lanczos(monkeypatch) -> None:
-    def _forbid_pil_resize(*args, **kwargs):
+def test_super_image_width_mode_uses_manual_lanczos(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _forbid_pil_resize(*args: object, **kwargs: object) -> None:
         raise AssertionError("PIL Image.resize should not be called")
 
     monkeypatch.setattr(Image.Image, "resize", _forbid_pil_resize)
-    monkeypatch.setattr(
-        image_enhancer,
-        "_load_super_image_model",
-        lambda model_name, scale, device: NearestUpscaler(),
-    )
+    monkeypatch.setattr(image_enhancer, "_load_super_image_model", _fake_session)
 
     options = EnhancementOptions(
         method=EnhancementMethod.SUPER_IMAGE,
@@ -201,3 +221,95 @@ def test_super_image_width_mode_uses_manual_lanczos(monkeypatch) -> None:
     enhanced_bytes = enhance_image(_encode_image((255, 0, 0)), options)
     with Image.open(BytesIO(enhanced_bytes)) as enhanced:
         assert enhanced.size == (20, 20)
+
+
+def test_upscale_rgb_array_tiled_matches_untiled_without_seams() -> None:
+    rng = np.random.default_rng(42)
+    source = rng.integers(0, 256, size=(53, 71, 3), dtype=np.uint8)
+    upscaler = NearestUpscaler()
+
+    untiled = upscale_rgb_array(source, runner=upscaler, scale=2, tile_size=256, tile_overlap=0)
+    progress_events: list[tuple[int, int]] = []
+    tiled = upscale_rgb_array(
+        source,
+        runner=upscaler,
+        scale=2,
+        tile_size=24,
+        tile_overlap=6,
+        progress_callback=lambda current, total: progress_events.append((current, total)),
+    )
+
+    assert tiled.shape == (106, 142, 3)
+    np.testing.assert_array_equal(tiled, untiled)
+    assert progress_events == [(index, 9) for index in range(1, 10)]
+
+
+def test_super_image_supports_cancellation_between_tiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_enhancer, "_load_super_image_model", _fake_session)
+    calls = 0
+
+    def _cancel_after_first_tile() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 2
+
+    options = EnhancementOptions(
+        method=EnhancementMethod.SUPER_IMAGE,
+        scale=2.0,
+        model_name="msrn",
+        device="cpu",
+        tile_size=16,
+        tile_overlap=4,
+    )
+    with pytest.raises(EnhancementCancelledError):
+        enhance_image(
+            _encode_image((10, 20, 30), size=(40, 40)),
+            options,
+            cancel_check=_cancel_after_first_tile,
+        )
+
+
+def test_ensure_model_file_downloads_atomically_and_reuses_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"onnx-binary-payload" * 1024
+    download_calls = 0
+
+    class _FakeResponse:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self) -> None:
+            self._stream = BytesIO(payload)
+
+        def read(self, size: int) -> bytes:
+            return self._stream.read(size)
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._stream.close()
+
+    def _fake_urlopen(*args: object, **kwargs: object) -> _FakeResponse:
+        nonlocal download_calls
+        download_calls += 1
+        return _FakeResponse()
+
+    monkeypatch.setenv("PDF_ASSET_EXTRACTOR_MODELS_DIR", str(tmp_path))
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    progress_updates: list[tuple[int, int | None]] = []
+    first_path = ensure_model_file(
+        "msrn",
+        2,
+        progress_callback=lambda downloaded, total: progress_updates.append((downloaded, total)),
+    )
+    assert first_path == tmp_path / "msrn-2x.onnx"
+    assert first_path.read_bytes() == payload
+    assert not (tmp_path / "msrn-2x.onnx.tmp").exists()
+    assert download_calls == 1
+    assert progress_updates[-1] == (len(payload), len(payload))
+
+    second_path = ensure_model_file("msrn", 2)
+    assert second_path == first_path
+    assert download_calls == 1

@@ -67,26 +67,21 @@ jobs:
             echo "value=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install dependencies (Windows, locked CPU PyTorch)
-        if: runner.os == 'Windows'
+      - name: Install locked dependencies
         run: uv sync --frozen --no-dev --group build
 
-      - name: Install dependencies (Linux, CPU-only PyTorch)
-        if: runner.os == 'Linux'
+      - name: Switch Windows build environment to ONNX Runtime DirectML (GPU)
+        if: runner.os == 'Windows'
         shell: bash
         run: |
-          uv venv .venv-build --python 3.12
-          uv pip install --no-config --python .venv-build \
-            --index https://download.pytorch.org/whl/cpu \
-            --default-index https://pypi.org/simple \
-            torch torchvision
-          uv pip install --no-config --python .venv-build --no-upgrade . "pyinstaller>=6.12.0"
+          uv pip uninstall --python .venv onnxruntime
+          uv pip install --no-config --python .venv "onnxruntime-directml>=1.20.0"
 
       - name: Build, smoke-test, and archive application (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          args=()
+          args=(--require-directml)
           if [[ -n "${{ steps.version.outputs.value }}" ]]; then
             args+=(--version "${{ steps.version.outputs.value }}")
           fi
@@ -96,11 +91,11 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          args=(--require-cpu-torch)
+          args=()
           if [[ -n "${{ steps.version.outputs.value }}" ]]; then
             args+=(--version "${{ steps.version.outputs.value }}")
           fi
-          .venv-build/bin/python scripts/build.py "${args[@]}"
+          uv run --no-sync python scripts/build.py "${args[@]}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
